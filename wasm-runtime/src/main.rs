@@ -4,7 +4,11 @@
 //! and channel adapters on behalf of the Go orchestrator.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tonic::{transport::Server, Request, Response, Status};
+
+mod runtime;
+use runtime::Runtime;
 
 pub mod wasm_proto {
     tonic::include_proto!("ironclaw.wasm");
@@ -15,9 +19,16 @@ use wasm_proto::{
     ChannelConfig, ChannelEvent, ChannelHandle, Empty, HealthStatus, ToolRequest, ToolResponse,
 };
 
-#[derive(Default)]
 pub struct WasmRuntimeService {
-    // TODO: wasmtime engine, module cache, channel handles
+    runtime: Arc<Runtime>,
+}
+
+impl WasmRuntimeService {
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            runtime: Arc::new(Runtime::new()?),
+        })
+    }
 }
 
 #[tonic::async_trait]
@@ -29,12 +40,36 @@ impl WasmRuntime for WasmRuntimeService {
         let req = request.into_inner();
         tracing::info!(tool = %req.tool_name, user_id = %req.user_id, "execute_tool");
 
-        // TODO: instantiate wasmtime, inject secrets, execute with fuel limit
+        let secrets: std::collections::HashMap<String, String> = req.secrets.into_iter().collect();
+
+        let result = tokio::task::spawn_blocking({
+            let rt = Arc::clone(&self.runtime);
+            let tool_name = req.tool_name.clone();
+            let wasm_module = req.wasm_module.clone();
+            let params_json = req.params_json.clone();
+            let secrets = secrets.clone();
+            let fuel_limit = req.fuel_limit;
+            let max_memory = req.max_memory;
+            move || {
+                rt.execute_tool(
+                    &tool_name,
+                    &wasm_module,
+                    &params_json,
+                    &secrets,
+                    fuel_limit,
+                    max_memory,
+                )
+            }
+        })
+        .await
+        .map_err(|e| Status::internal(format!("blocking task failed: {}", e)))?
+        .map_err(|e| Status::internal(format!("wasm execution failed: {}", e)))?;
+
         let response = ToolResponse {
-            success: true,
-            output_json: r#"{"result":"ok"}"#.to_string(),
-            error_message: String::new(),
-            fuel_consumed: 0,
+            success: result.success,
+            output_json: result.output_json,
+            error_message: result.error_message,
+            fuel_consumed: result.fuel_consumed,
         };
         Ok(Response::new(response))
     }
@@ -46,12 +81,16 @@ impl WasmRuntime for WasmRuntimeService {
         let req = request.into_inner();
         tracing::info!(channel = %req.channel_name, "load_channel");
 
-        let handle = ChannelHandle {
-            handle_id: uuid::Uuid::new_v4().to_string(),
+        let handle_id = self
+            .runtime
+            .load_channel(&req.channel_name, &req.wasm_module, &req.config_json)
+            .map_err(|e| Status::internal(format!("load channel failed: {}", e)))?;
+
+        Ok(Response::new(ChannelHandle {
+            handle_id,
             success: true,
             error_message: String::new(),
-        };
-        Ok(Response::new(handle))
+        }))
     }
 
     async fn send_channel_event(
@@ -60,6 +99,11 @@ impl WasmRuntime for WasmRuntimeService {
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
         tracing::info!(handle = %req.handle_id, "send_channel_event");
+
+        self.runtime
+            .send_channel_event(&req.handle_id, &req.event_json)
+            .map_err(|e| Status::internal(format!("send event failed: {}", e)))?;
+
         Ok(Response::new(Empty {}))
     }
 
@@ -83,8 +127,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%addr, "IronClaw WASM Runtime starting");
 
+    let service = WasmRuntimeService::new()?;
+
     Server::builder()
-        .add_service(WasmRuntimeServer::new(WasmRuntimeService::default()))
+        .add_service(WasmRuntimeServer::new(service))
         .serve(addr)
         .await?;
 
