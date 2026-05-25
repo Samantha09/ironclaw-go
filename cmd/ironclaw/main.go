@@ -18,7 +18,7 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.LoadFromEnv()
+	cfg, err := config.Load("")
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}

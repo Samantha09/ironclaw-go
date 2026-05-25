@@ -4,8 +4,9 @@ import "context"
 
 // JobContext — execution context for a tool invocation.
 type JobContext struct {
-	UserID string
-	JobID  string
+	UserID   string
+	JobID    string
+	ThreadID string
 }
 
 // ToolOutput — result of a tool invocation.

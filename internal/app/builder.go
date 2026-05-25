@@ -32,6 +32,10 @@ func Build(cfg config.Config) (*App, error) {
 	registry.Register(builtin.NewEchoTool())
 	registry.Register(builtin.NewTimeTool())
 	registry.Register(builtin.NewJSONTool())
+	registry.Register(builtin.NewShellTool())
+	registry.Register(builtin.NewFileTool())
+	registry.Register(builtin.NewHTTPTool())
+	registry.Register(builtin.NewMemoryTool())
 
 	// Safety + Dispatcher
 	safetyLayer := safety.NewLayer()
@@ -40,6 +44,7 @@ func Build(cfg config.Config) (*App, error) {
 	// Agent
 	agentDeps := agent.Deps{
 		OwnerID:    cfg.OwnerID,
+		Database:   database,
 		Tools:      registry,
 		Dispatcher: dispatcher,
 	}
@@ -53,6 +58,7 @@ func Build(cfg config.Config) (*App, error) {
 	mgr := channels.NewManager()
 	replCh := repl.New(cfg.OwnerID)
 	mgr.Add(replCh)
+	mgr.Start(context.Background())
 
 	return &App{
 		Config:   cfg,
