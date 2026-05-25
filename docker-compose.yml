@@ -7,8 +7,23 @@ services:
       - "8080:8080"
     environment:
       - IRONCLAW_ENV=production
+      - IRONCLAW_DATABASE_DRIVER=postgres
+      - IRONCLAW_DATABASE_DSN=postgres://ironclaw:ironclaw@postgres:5432/ironclaw?sslmode=disable
+      - IRONCLAW_SIDECAR_ADDR=sidecar:50051
     volumes:
       - ./data:/app/data
+    depends_on:
+      - postgres
+      - sidecar
+
+  sidecar:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sidecar
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ./extensions:/app/extensions:ro
 
   postgres:
     image: postgres:16-alpine

@@ -1,0 +1,15 @@
+# IronClaw Rust WASM Sidecar 多阶段构建
+FROM rust:1.86-alpine AS rust-builder
+RUN apk add --no-cache musl-dev protoc openssl-dev
+WORKDIR /app
+COPY wasm-runtime/ ./wasm-runtime/
+COPY proto/ ./proto/
+COPY Makefile ./
+RUN make build-rust
+
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates libgcc
+WORKDIR /app
+COPY --from=rust-builder /app/wasm-runtime/target/release/ironclaw-wasm-runtime ./wasm-runtime
+EXPOSE 50051
+CMD ["./wasm-runtime"]

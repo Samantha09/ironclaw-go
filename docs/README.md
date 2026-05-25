@@ -80,6 +80,20 @@ make test     # 运行两边的测试
 make clean    # 清理构建产物
 ```
 
+## Docker 部署
+
+```bash
+# 构建并启动完整栈（Go + Rust Sidecar + PostgreSQL）
+docker-compose up --build
+
+# 仅启动 Go 编排器与内存数据库
+docker-compose up ironclaw --build
+```
+
+服务默认暴露端口：
+- `8080` — HTTP Gateway
+- `5432` — PostgreSQL（开发环境）
+
 ## 设计决策
 
 - **Go 负责编排**：编译速度快，HTTP/DB 生态完善，并发简单易用。

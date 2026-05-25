@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Download deps
+        run: go mod download
+      - name: Build
+        run: make build-go
+      - name: Test
+        run: make test-go
+      - name: Format check
+        run: test -z "$(gofmt -l .)"
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-action@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build
+        run: make build-rust
+      - name: Test
+        run: make test-rust
+      - name: Format check
+        run: cd wasm-runtime && cargo fmt -- --check

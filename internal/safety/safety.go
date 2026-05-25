@@ -42,7 +42,7 @@ func (l *Layer) ScanInbound(_ context.Context, content string) error {
 
 	// 检测 prompt injection 关键词
 	for _, word := range l.blockedWords {
-		if strings.Contains(lower, word) {
+		if strings.Contains(lower, strings.ToLower(word)) {
 			return fmt.Errorf("safety: detected suspicious pattern: %q", word)
 		}
 	}
@@ -112,7 +112,7 @@ func (r *RateLimiter) Allow(key string) bool {
 
 	now := time.Now()
 	lim, ok := r.limits[key]
-	if !ok || now.After(lim.window) {
+	if !ok || (r.window > 0 && now.After(lim.window)) {
 		r.limits[key] = &rateLimit{count: 1, window: now.Add(r.window)}
 		return true
 	}
