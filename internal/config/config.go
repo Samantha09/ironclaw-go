@@ -215,7 +215,7 @@ func (c *Config) loadFromEnv() error {
 			c.LLM.Model = "MiniMax-M2.7"
 		}
 		if c.LLM.BaseURL == "" {
-			c.LLM.BaseURL = "https://api.minimaxi.com/anthropic"
+			c.LLM.BaseURL = "https://api.minimax.chat/v1"
 		}
 	}
 	if v := os.Getenv("IRONCLAW_LLM_BASE_URL"); v != "" {

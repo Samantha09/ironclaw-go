@@ -12,10 +12,11 @@ import (
 
 // OpenAIClient 调用 OpenAI 兼容 API。
 type OpenAIClient struct {
-	model   string
-	apiKey  string
-	baseURL string
-	client  *http.Client
+	model          string
+	apiKey         string
+	baseURL        string
+	completionPath string
+	client         *http.Client
 }
 
 // NewOpenAIClient 创建 OpenAI 客户端。
@@ -24,11 +25,19 @@ func NewOpenAIClient(model, apiKey, baseURL string) *OpenAIClient {
 		baseURL = "https://api.openai.com/v1"
 	}
 	return &OpenAIClient{
-		model:   model,
-		apiKey:  apiKey,
-		baseURL: baseURL,
-		client:  &http.Client{Timeout: 60 * time.Second},
+		model:          model,
+		apiKey:         apiKey,
+		baseURL:        baseURL,
+		completionPath: "/chat/completions",
+		client:         &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// NewOpenAIClientWithEndpoint 创建带自定义 completion 端点的 OpenAI 兼容客户端。
+func NewOpenAIClientWithEndpoint(model, apiKey, baseURL, completionPath string) *OpenAIClient {
+	c := NewOpenAIClient(model, apiKey, baseURL)
+	c.completionPath = completionPath
+	return c
 }
 
 func (c *OpenAIClient) ModelName() string { return c.model }
@@ -40,7 +49,7 @@ func (c *OpenAIClient) Complete(ctx context.Context, messages []Message, tools [
 		return CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+c.completionPath, bytes.NewReader(body))
 	if err != nil {
 		return CompletionResponse{}, fmt.Errorf("create request: %w", err)
 	}
@@ -87,7 +96,7 @@ func (c *OpenAIClient) StreamComplete(ctx context.Context, messages []Message, t
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+c.completionPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

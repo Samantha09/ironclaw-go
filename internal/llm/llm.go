@@ -93,9 +93,9 @@ func New(provider, model, apiKey, baseURL string) (LlmProvider, error) {
 		return NewAnthropicClient(model, apiKey, baseURL), nil
 	case "minimax":
 		if baseURL == "" {
-			baseURL = "https://api.minimaxi.com/anthropic"
+			baseURL = "https://api.minimax.chat/v1"
 		}
-		return NewAnthropicClient(model, apiKey, baseURL), nil
+		return NewOpenAIClientWithEndpoint(model, apiKey, baseURL, "/text/chatcompletion_v2"), nil
 	case "ollama":
 		return NewOllamaClient(model, baseURL), nil
 	default:
