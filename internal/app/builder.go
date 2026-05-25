@@ -9,7 +9,9 @@ import (
 	"github.com/nearai/ironclaw-go/internal/channels/repl"
 	"github.com/nearai/ironclaw-go/internal/config"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/safety"
+	"github.com/nearai/ironclaw-go/internal/secrets"
 	"github.com/nearai/ironclaw-go/internal/tools"
 	"github.com/nearai/ironclaw-go/internal/tools/builtin"
 )
@@ -27,6 +29,9 @@ func Build(cfg config.Config) (*App, error) {
 	// Database
 	database := db.NewMemoryDB()
 
+	// Secrets
+	_, _ = secrets.NewStoreFromEnv()
+
 	// Tools
 	registry := tools.NewRegistry()
 	registry.Register(builtin.NewEchoTool())
@@ -37,6 +42,16 @@ func Build(cfg config.Config) (*App, error) {
 	registry.Register(builtin.NewHTTPTool())
 	registry.Register(builtin.NewMemoryTool())
 
+	// LLM
+	var llmProvider llm.LlmProvider
+	if cfg.LLM.APIKey != "" || cfg.LLM.Provider == "ollama" {
+		p, err := llm.New(cfg.LLM.Provider, cfg.LLM.Model, cfg.LLM.APIKey, cfg.LLM.BaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("init llm: %w", err)
+		}
+		llmProvider = p
+	}
+
 	// Safety + Dispatcher
 	safetyLayer := safety.NewLayer()
 	dispatcher := tools.NewDispatcher(registry, safetyLayer)
@@ -45,6 +60,7 @@ func Build(cfg config.Config) (*App, error) {
 	agentDeps := agent.Deps{
 		OwnerID:    cfg.OwnerID,
 		Database:   database,
+		LLM:        llmProvider,
 		Tools:      registry,
 		Dispatcher: dispatcher,
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -60,7 +61,6 @@ func (a *Agent) handleSystemCommand(_ context.Context, userID string, intent Int
 		for i, t := range threads {
 			mark := " "
 			if active := a.sessionManager.GetThread(userID, t.ID); active != nil {
-				// 简化：假设列表中的第一个是活跃的
 				if i == 0 {
 					mark = "*"
 				}
@@ -90,9 +90,9 @@ func (a *Agent) handleSystemCommand(_ context.Context, userID string, intent Int
   /new, /n        - 创建新线程
   /help, /h       - 显示此帮助
 
-直接输入: 普通对话
+直接输入: 普通对话（如有 LLM 配置则通过 LLM 处理）
   tool:<name> <params> - 直接调用工具
-  ?<query>             - LLM 查询（需配置 LLM）`}, nil
+  ?<query>             - LLM 查询`}, nil
 
 	default:
 		return channels.OutgoingResponse{Content: fmt.Sprintf("未知命令: /%s，输入 /help 查看帮助", intent.Command)}, nil
@@ -105,7 +105,6 @@ func (a *Agent) handleToolInvocation(ctx context.Context, userID string, intent 
 
 	var params map[string]any
 	if intent.ToolParams != "" {
-		// 尝试解析 JSON，失败则当作字符串 message 传递
 		if err := json.Unmarshal([]byte(intent.ToolParams), &params); err != nil {
 			params = map[string]any{"message": intent.ToolParams}
 		}
@@ -131,45 +130,167 @@ func (a *Agent) handleToolInvocation(ctx context.Context, userID string, intent 
 
 // handleLLMQuery 处理 LLM 查询。
 func (a *Agent) handleLLMQuery(ctx context.Context, userID string, intent Intent) (channels.OutgoingResponse, error) {
-	// MVP: LLM 集成后续实现，当前回退到 echo
-	_ = ctx
-	_ = userID
-
-	resp := fmt.Sprintf("[%s] LLM 查询（尚未集成 LLM 提供商）: %s", a.config.Name, intent.Content)
-
-	turn := Turn{
-		UserMsg:   intent.Content,
-		AgentResp: resp,
+	if a.deps.LLM == nil {
+		return channels.OutgoingResponse{Content: "LLM 未配置，请先设置 LLM 提供商。"}, nil
 	}
-	a.sessionManager.AddTurn(userID, turn)
-
-	return channels.OutgoingResponse{Content: resp}, nil
+	return a.runLLM(ctx, userID, intent.Content)
 }
 
 // handleChat 处理普通对话。
 func (a *Agent) handleChat(ctx context.Context, userID string, intent Intent) (channels.OutgoingResponse, error) {
-	_ = ctx
+	if a.deps.LLM == nil {
+		// 无 LLM 时回退到 echo
+		return a.echoReply(userID, intent.Content), nil
+	}
+	return a.runLLM(ctx, userID, intent.Content)
+}
+
+// runLLM 执行 LLM 推理循环。
+func (a *Agent) runLLM(ctx context.Context, userID string, content string) (channels.OutgoingResponse, error) {
 	thread := a.sessionManager.GetOrCreateThread(userID, "repl")
 
-	// MVP: 无 LLM 时回退到 echo
-	resp := fmt.Sprintf("[%s] 你说: %s", a.config.Name, intent.Content)
+	// 构建 LLM 消息历史
+	messages := a.buildLLMMessages(userID, content)
+
+	// 将工具注册表转换为 LLM 工具定义
+	toolDefs := a.buildLLMTools()
+
+	// 调用 LLM
+	resp, err := a.deps.LLM.Complete(ctx, messages, toolDefs)
+	if err != nil {
+		return channels.OutgoingResponse{Content: fmt.Sprintf("LLM 错误: %v", err)}, nil
+	}
+
+	// 如果 LLM 返回工具调用，执行它们
+	if len(resp.ToolCalls) > 0 {
+		return a.handleLLMToolCalls(ctx, userID, thread.ID, content, resp)
+	}
+
+	// 普通文本回复
+	turn := Turn{
+		UserMsg:   content,
+		AgentResp: resp.Content,
+	}
+	a.sessionManager.AddTurn(userID, turn)
+	a.persistIfNeeded(ctx, thread)
+
+	return channels.OutgoingResponse{Content: resp.Content}, nil
+}
+
+// handleLLMToolCalls 处理 LLM 返回的工具调用。
+func (a *Agent) handleLLMToolCalls(ctx context.Context, userID, threadID, originalContent string, resp llm.CompletionResponse) (channels.OutgoingResponse, error) {
+	var toolResults []llm.Message
+
+	for _, call := range resp.ToolCalls {
+		var params map[string]any
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &params); err != nil {
+			params = map[string]any{"message": call.Function.Arguments}
+		}
+
+		out, err := a.deps.Dispatcher.Dispatch(ctx, call.Function.Name, params, &tools.JobContext{
+			UserID:   userID,
+			ThreadID: threadID,
+		})
+
+		result := out.Content
+		if err != nil {
+			result = fmt.Sprintf("错误: %v", err)
+		}
+
+		toolResults = append(toolResults, llm.Message{
+			Role:     llm.RoleTool,
+			Content:  result,
+			ToolName: call.Function.Name,
+			ToolID:   call.ID,
+		})
+	}
+
+	// 将工具结果返回给 LLM 进行总结
+	messages := a.buildLLMMessages(userID, originalContent)
+	messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+	messages = append(messages, toolResults...)
+
+	finalResp, err := a.deps.LLM.Complete(ctx, messages, nil)
+	if err != nil {
+		return channels.OutgoingResponse{Content: fmt.Sprintf("LLM 总结错误: %v", err)}, nil
+	}
 
 	turn := Turn{
-		UserMsg:   intent.Content,
+		UserMsg:   originalContent,
+		AgentResp: finalResp.Content,
+	}
+	a.sessionManager.AddTurn(userID, turn)
+
+	return channels.OutgoingResponse{Content: finalResp.Content}, nil
+}
+
+// buildLLMMessages 将对话历史转换为 LLM 消息格式。
+func (a *Agent) buildLLMMessages(userID, currentContent string) []llm.Message {
+	turns := a.sessionManager.GetTurns(userID)
+
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: fmt.Sprintf("你是 %s，一个安全的个人 AI 助手。", a.config.Name)},
+	}
+
+	for _, turn := range turns {
+		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: turn.UserMsg})
+		if turn.AgentResp != "" {
+			messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: turn.AgentResp})
+		}
+	}
+
+	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: currentContent})
+	return messages
+}
+
+// buildLLMTools 将工具注册表转换为 LLM 工具定义。
+func (a *Agent) buildLLMTools() []llm.ToolDefinition {
+	if a.deps.Tools == nil {
+		return nil
+	}
+
+	names := a.deps.Tools.List()
+	defs := make([]llm.ToolDefinition, 0, len(names))
+	for _, name := range names {
+		tool, ok := a.deps.Tools.Get(name)
+		if !ok {
+			continue
+		}
+		defs = append(defs, llm.ToolDefinition{
+			Type: "function",
+			Function: llm.FunctionSchema{
+				Name:        tool.Name(),
+				Description: tool.Description(),
+				Parameters:  tool.ParameterSchema(),
+			},
+		})
+	}
+	return defs
+}
+
+// echoReply 无 LLM 时的回退回复。
+func (a *Agent) echoReply(userID, content string) channels.OutgoingResponse {
+	_ = a.sessionManager.GetOrCreateThread(userID, "repl")
+	resp := fmt.Sprintf("[%s] 你说: %s", a.config.Name, content)
+
+	turn := Turn{
+		UserMsg:   content,
 		AgentResp: resp,
 	}
 	a.sessionManager.AddTurn(userID, turn)
 
-	// 上下文压缩：当轮次过多时自动压缩
 	const maxTurns = 50
 	a.sessionManager.CompactThread(userID, maxTurns)
 
-	// 持久化到数据库（如果配置了）
-	if a.deps.Database != nil {
-		_ = a.persistThread(ctx, thread)
-	}
+	return channels.OutgoingResponse{Content: resp}
+}
 
-	return channels.OutgoingResponse{Content: resp}, nil
+// persistIfNeeded 在配置了数据库时持久化线程。
+func (a *Agent) persistIfNeeded(ctx context.Context, thread *Thread) {
+	if a.deps.Database == nil {
+		return
+	}
+	_ = a.persistThread(ctx, thread)
 }
 
 // persistThread 将线程持久化到数据库。
