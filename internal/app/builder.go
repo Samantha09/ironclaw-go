@@ -6,8 +6,10 @@ import (
 
 	"github.com/nearai/ironclaw-go/internal/agent"
 	"github.com/nearai/ironclaw-go/internal/channels"
+	"github.com/nearai/ironclaw-go/internal/channels/httpgw"
 	"github.com/nearai/ironclaw-go/internal/channels/repl"
 	"github.com/nearai/ironclaw-go/internal/config"
+	"github.com/nearai/ironclaw-go/internal/webhooks"
 	"github.com/nearai/ironclaw-go/internal/db"
 	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/safety"
@@ -74,6 +76,20 @@ func Build(cfg config.Config) (*App, error) {
 	mgr := channels.NewManager()
 	replCh := repl.New(cfg.OwnerID)
 	mgr.Add(replCh)
+
+	if cfg.Channels.HTTP {
+		gw := httpgw.New(cfg.Channels.HTTPPort)
+		gw.Start()
+		mgr.Add(gw)
+		fmt.Printf("HTTP Gateway listening on :%d\n", cfg.Channels.HTTPPort)
+	}
+
+	// Webhook 服务器（固定使用 HTTPPort+1）
+	wh := webhooks.NewServer(cfg.Channels.HTTPPort + 1)
+	wh.Start()
+	mgr.Add(wh)
+	fmt.Printf("Webhook server listening on :%d\n", cfg.Channels.HTTPPort+1)
+
 	mgr.Start(context.Background())
 
 	return &App{
