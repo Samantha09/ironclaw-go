@@ -1,6 +1,7 @@
 # IronClaw Go Orchestrator 多阶段构建
 FROM golang:1.24-alpine AS go-builder
-RUN apk add --no-cache git make protoc
+ENV GOTOOLCHAIN=auto
+RUN apk add --no-cache git make protoc ca-certificates
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download

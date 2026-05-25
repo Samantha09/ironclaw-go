@@ -211,6 +211,9 @@ func (c *Config) loadFromEnv() error {
 	}
 
 	// Channels
+	if v := os.Getenv("IRONCLAW_CHANNELS_HTTP"); v != "" {
+		c.Channels.HTTP = v == "true" || v == "1" || v == "yes"
+	}
 	if v := os.Getenv("IRONCLAW_CHANNELS_HTTP_PORT"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
