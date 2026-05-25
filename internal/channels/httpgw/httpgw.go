@@ -2,6 +2,7 @@ package httpgw
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/nearai/ironclaw-go/internal/channels"
 )
+
+//go:embed static/index.html
+var staticFS embed.FS
 
 // Gateway 是一个 HTTP 通道，通过 REST API 接收消息并返回响应。
 type Gateway struct {
@@ -71,6 +75,7 @@ func (g *Gateway) Start() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/chat", g.handleChat)
 	mux.HandleFunc("/health", g.handleHealth)
+	mux.HandleFunc("/", g.handleIndex)
 
 	g.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", g.port),
@@ -147,6 +152,20 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"channel": g.Name(),
 	})
+}
+
+func (g *Gateway) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		http.Error(w, "index.html not found", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
 }
 
 type chatRequest struct {
