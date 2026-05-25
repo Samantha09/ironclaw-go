@@ -206,6 +206,18 @@ func (c *Config) loadFromEnv() error {
 	if v := os.Getenv("IRONCLAW_LLM_API_KEY"); v != "" {
 		c.LLM.APIKey = v
 	}
+	if v := os.Getenv("MINIMAX_API_KEY"); v != "" {
+		c.LLM.APIKey = v
+		if c.LLM.Provider == "" || c.LLM.Provider == "openai" {
+			c.LLM.Provider = "minimax"
+		}
+		if c.LLM.Model == "" || c.LLM.Model == "gpt-4o-mini" {
+			c.LLM.Model = "MiniMax-M2.7"
+		}
+		if c.LLM.BaseURL == "" {
+			c.LLM.BaseURL = "https://api.minimaxi.com/anthropic"
+		}
+	}
 	if v := os.Getenv("IRONCLAW_LLM_BASE_URL"); v != "" {
 		c.LLM.BaseURL = v
 	}

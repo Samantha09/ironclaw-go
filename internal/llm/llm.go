@@ -91,6 +91,11 @@ func New(provider, model, apiKey, baseURL string) (LlmProvider, error) {
 		return NewOpenAIClient(model, apiKey, baseURL), nil
 	case "anthropic":
 		return NewAnthropicClient(model, apiKey, baseURL), nil
+	case "minimax":
+		if baseURL == "" {
+			baseURL = "https://api.minimaxi.com/anthropic"
+		}
+		return NewAnthropicClient(model, apiKey, baseURL), nil
 	case "ollama":
 		return NewOllamaClient(model, baseURL), nil
 	default:
