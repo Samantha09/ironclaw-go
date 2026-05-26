@@ -8,6 +8,7 @@ import (
 	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/channels/httpgw"
 	"github.com/nearai/ironclaw-go/internal/channels/repl"
+	"github.com/nearai/ironclaw-go/internal/channels/websocket"
 	"github.com/nearai/ironclaw-go/internal/config"
 	"github.com/nearai/ironclaw-go/internal/db"
 	"github.com/nearai/ironclaw-go/internal/llm"
@@ -96,6 +97,13 @@ func Build(cfg config.Config) (*App, error) {
 	wh.Start()
 	mgr.Add(wh)
 	fmt.Printf("Webhook server listening on :%d\n", cfg.Channels.HTTPPort+1)
+
+	if cfg.Channels.WebSocket {
+		wsCh := websocket.New(cfg.Channels.WebSocketPort)
+		wsCh.Start()
+		mgr.Add(wsCh)
+		fmt.Printf("WebSocket server listening on :%d/ws\n", cfg.Channels.WebSocketPort)
+	}
 
 	mgr.Start(context.Background())
 

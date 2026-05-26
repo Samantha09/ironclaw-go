@@ -32,10 +32,11 @@ type LLMConfig struct {
 
 // ChannelConfig 通道配置。
 type ChannelConfig struct {
-	REPL     bool `toml:"repl"`
-	HTTP     bool `toml:"http"`
-	WebSocket bool `toml:"websocket"`
-	HTTPPort int  `toml:"http_port"`
+	REPL          bool `toml:"repl"`
+	HTTP          bool `toml:"http"`
+	WebSocket     bool `toml:"websocket"`
+	HTTPPort      int  `toml:"http_port"`
+	WebSocketPort int  `toml:"websocket_port"`
 }
 
 // SafetyConfig 安全配置。
@@ -97,10 +98,11 @@ func DefaultConfig() Config {
 			Temperature: 0.7,
 		},
 		Channels: ChannelConfig{
-			REPL:      true,
-			HTTP:      false,
-			WebSocket: false,
-			HTTPPort:  8080,
+			REPL:          true,
+			HTTP:          false,
+			WebSocket:     false,
+			HTTPPort:      8080,
+			WebSocketPort: 8081,
 		},
 		Safety: SafetyConfig{
 			ScanInbound:        true,
