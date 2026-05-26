@@ -66,6 +66,7 @@ type Config struct {
 	OwnerID   string         `toml:"owner_id"`
 	Env       string         `toml:"env"`        // development, staging, production
 	LogLevel  string         `toml:"log_level"`  // trace, debug, info, warn, error
+	APIKey    string         `toml:"api_key"`    // 若设置则启用 API Key 认证
 	Agent     AgentConfig    `toml:"agent"`
 	Database  DatabaseConfig `toml:"database"`
 	LLM       LLMConfig      `toml:"llm"`
@@ -196,6 +197,11 @@ func (c *Config) loadFromEnv() error {
 	}
 	if v := os.Getenv("IRONCLAW_DATABASE_DSN"); v != "" {
 		c.Database.DSN = v
+	}
+
+	// API Key
+	if v := os.Getenv("IRONCLAW_API_KEY"); v != "" {
+		c.APIKey = v
 	}
 
 	// LLM

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/nearai/ironclaw-go/internal/agent"
+	"github.com/nearai/ironclaw-go/internal/auth"
 	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/channels/httpgw"
 	"github.com/nearai/ironclaw-go/internal/channels/repl"
@@ -93,13 +94,22 @@ func Build(cfg config.Config) (*App, error) {
 		AutoApproveTools: cfg.Agent.AutoApproveTools,
 	}, agentDeps)
 
+	// Auth
+	var authenticator auth.Authenticator
+	if cfg.APIKey != "" {
+		authenticator = auth.NewAPIKeyAuth(map[string]string{cfg.APIKey: cfg.OwnerID})
+		logger.Info("API Key authentication enabled")
+	} else {
+		authenticator = auth.NewNoAuth()
+	}
+
 	// Channels
 	mgr := channels.NewManager()
 	replCh := repl.New(cfg.OwnerID)
 	mgr.Add(replCh)
 
 	if cfg.Channels.HTTP {
-		gw := httpgw.New(cfg.Channels.HTTPPort)
+		gw := httpgw.New(cfg.Channels.HTTPPort).WithAuth(authenticator)
 		gw.Start()
 		mgr.Add(gw)
 		logger.Info("HTTP Gateway started", slog.Int("port", cfg.Channels.HTTPPort))
@@ -112,7 +122,7 @@ func Build(cfg config.Config) (*App, error) {
 	logger.Info("Webhook server started", slog.Int("port", cfg.Channels.HTTPPort+1))
 
 	if cfg.Channels.WebSocket {
-		wsCh := websocket.New(cfg.Channels.WebSocketPort)
+		wsCh := websocket.New(cfg.Channels.WebSocketPort).WithAuth(authenticator)
 		wsCh.Start()
 		mgr.Add(wsCh)
 		logger.Info("WebSocket server started", slog.Int("port", cfg.Channels.WebSocketPort))

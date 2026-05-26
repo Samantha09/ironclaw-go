@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/nearai/ironclaw-go/internal/auth"
 	"github.com/nearai/ironclaw-go/internal/channels"
 	"golang.org/x/net/websocket"
 )
@@ -18,16 +19,18 @@ type wsMessage struct {
 	UserID   string `json:"user_id,omitempty"`
 	Content  string `json:"content"`
 	ThreadID string `json:"thread_id,omitempty"`
+	APIKey   string `json:"api_key,omitempty"`
 }
 
 // Channel 是 WebSocket 通道实现。
 type Channel struct {
-	port     int
-	msgChan  chan channels.IncomingMessage
-	clients  map[string]*websocket.Conn // connID -> conn
-	mu       sync.RWMutex
-	server   *http.Server
-	shutdown chan struct{}
+	port          int
+	msgChan       chan channels.IncomingMessage
+	clients       map[string]*websocket.Conn // connID -> conn
+	mu            sync.RWMutex
+	server        *http.Server
+	shutdown      chan struct{}
+	authenticator auth.Authenticator
 }
 
 // New 创建新的 WebSocket 通道。
@@ -41,6 +44,12 @@ func New(port int) *Channel {
 }
 
 func (c *Channel) Name() string { return "websocket" }
+
+// WithAuth 设置认证器。
+func (c *Channel) WithAuth(a auth.Authenticator) *Channel {
+	c.authenticator = a
+	return c
+}
 
 func (c *Channel) Messages() <-chan channels.IncomingMessage {
 	return c.msgChan
@@ -137,15 +146,26 @@ func (c *Channel) handleConn(conn *websocket.Conn) {
 		if msg.Content == "" {
 			continue
 		}
-		if msg.UserID == "" {
-			msg.UserID = connID
+
+		userID := msg.UserID
+		if c.authenticator != nil {
+			authUserID, err := c.authenticator.Authenticate(context.Background(), msg.APIKey)
+			if err != nil {
+				// 认证失败，发送错误并关闭连接
+				_ = websocket.JSON.Send(conn, wsMessage{Content: "unauthorized"})
+				return
+			}
+			userID = authUserID
+		}
+		if userID == "" {
+			userID = connID
 		}
 
 		requestID := uuid.New().String()
 		c.msgChan <- channels.IncomingMessage{
 			ID:       requestID,
 			Channel:  c.Name(),
-			UserID:   msg.UserID,
+			UserID:   userID,
 			Content:  msg.Content,
 			ThreadID: msg.ThreadID,
 		}

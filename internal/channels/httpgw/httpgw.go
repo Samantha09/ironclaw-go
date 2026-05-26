@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nearai/ironclaw-go/internal/auth"
 	"github.com/nearai/ironclaw-go/internal/channels"
 )
 
@@ -24,6 +25,7 @@ type Gateway struct {
 	mu        sync.RWMutex
 	server    *http.Server
 	shutdown  chan struct{}
+	authenticator auth.Authenticator
 }
 
 // New 创建新的 HTTP 网关通道。
@@ -37,6 +39,12 @@ func New(port int) *Gateway {
 }
 
 func (g *Gateway) Name() string { return "http" }
+
+// WithAuth 设置认证器。
+func (g *Gateway) WithAuth(a auth.Authenticator) *Gateway {
+	g.authenticator = a
+	return g
+}
 
 func (g *Gateway) Messages() <-chan channels.IncomingMessage {
 	return g.msgChan
@@ -99,6 +107,16 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
 		return
+	}
+
+	// 认证
+	if g.authenticator != nil {
+		userID, err := g.authenticator.Authenticate(r.Context(), req.APIKey)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		req.UserID = userID
 	}
 
 	if req.UserID == "" {
@@ -172,6 +190,7 @@ type chatRequest struct {
 	UserID   string `json:"user_id"`
 	Content  string `json:"content"`
 	ThreadID string `json:"thread_id,omitempty"`
+	APIKey   string `json:"api_key,omitempty"`
 }
 
 type chatResponse struct {
