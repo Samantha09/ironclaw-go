@@ -2,6 +2,8 @@
 
 IronClaw Go 是 IronClaw 安全个人 AI 助手的混合 Go + Rust 重构实现。Go 编排器负责业务逻辑、通道和配置；Rust sidecar 托管 wasmtime WASM 运行时。
 
+> **每次开发前，阅读 `.claude/memory/MEMORY.md` 中的记忆条目。** 其中包含参考项目路径（`/home/san/GolandProjects/ironclaw`）和功能对照基准，新模块实现需与 Rust 原版对齐。
+
 ## 架构
 
 ```
