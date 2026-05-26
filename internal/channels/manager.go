@@ -4,110 +4,116 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // Manager — 合并多个通道的消息流，支持动态增删。
 type Manager struct {
 	mu       sync.RWMutex
 	channels map[string]Channel
+	addCh    chan Channel        // 通知 mergeLoop 新通道
 	injectCh chan IncomingMessage // 用于内部任务推送消息
 	recvCh   chan IncomingMessage // 合并后的消息流
 	stopCh   chan struct{}
+	started  atomic.Bool
 	wg       sync.WaitGroup
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		channels: make(map[string]Channel),
+		addCh:    make(chan Channel, 8),
 		injectCh: make(chan IncomingMessage, 64),
 		recvCh:   make(chan IncomingMessage, 64),
 		stopCh:   make(chan struct{}),
 	}
 }
 
-// Start 启动消息合并循环（在 Run 之前调用）。
+// Start 启动消息合并循环（幂等，仅能调用一次）。
 func (m *Manager) Start(ctx context.Context) {
+	if !m.started.CompareAndSwap(false, true) {
+		return
+	}
 	m.wg.Add(1)
 	go m.mergeLoop(ctx)
 }
 
-// mergeLoop 常驻合并循环。
+// mergeLoop 常驻合并循环，支持运行时动态添加通道。
 func (m *Manager) mergeLoop(ctx context.Context) {
 	defer m.wg.Done()
 	defer close(m.recvCh)
 
-	// merged 是所有通道消息的中转站
 	merged := make(chan IncomingMessage, 64)
 	var innerWg sync.WaitGroup
-	var innerMu sync.Mutex
 	active := make(map[string]bool)
+	var activeMu sync.Mutex
 
 	// 启动时合并已有通道
 	m.mu.RLock()
 	for _, ch := range m.channels {
 		innerWg.Add(1)
 		active[ch.Name()] = true
-		go func(name string, ch <-chan IncomingMessage) {
-			defer innerWg.Done()
-			defer func() {
-				innerMu.Lock()
-				delete(active, name)
-				innerMu.Unlock()
-			}()
-			for {
-				select {
-				case msg, ok := <-ch:
-					if !ok {
-						return
-					}
-					select {
-					case merged <- msg:
-					case <-ctx.Done():
-						return
-					case <-m.stopCh:
-						return
-					}
-				case <-ctx.Done():
-					return
-				case <-m.stopCh:
-					return
-				}
-			}
-		}(ch.Name(), ch.Messages())
+		go m.forwardChannel(ctx, ch.Name(), ch.Messages(), merged, &innerWg, active, &activeMu)
 	}
 	m.mu.RUnlock()
 
 	// 也监听 injectCh
 	innerWg.Add(1)
-	go func() {
-		defer innerWg.Done()
-		for {
-			select {
-			case msg, ok := <-m.injectCh:
-				if !ok {
-					return
-				}
-				select {
-				case merged <- msg:
-				case <-ctx.Done():
-					return
-				case <-m.stopCh:
-					return
-				}
-			case <-ctx.Done():
-				return
-			case <-m.stopCh:
-				return
-			}
-		}
-	}()
+	go m.forwardInject(ctx, m.injectCh, merged, &innerWg)
 
-	// 将 merged 中的消息转发到 recvCh
+	// 主循环：从 merged/addCh 转发到 recvCh
 	for {
 		select {
 		case msg := <-merged:
 			select {
 			case m.recvCh <- msg:
+			case <-ctx.Done():
+				return
+			case <-m.stopCh:
+				return
+			}
+		case ch := <-m.addCh:
+			name := ch.Name()
+			activeMu.Lock()
+			if active[name] {
+				activeMu.Unlock()
+				continue
+			}
+			active[name] = true
+			activeMu.Unlock()
+			innerWg.Add(1)
+			go m.forwardChannel(ctx, name, ch.Messages(), merged, &innerWg, active, &activeMu)
+		case <-ctx.Done():
+			return
+		case <-m.stopCh:
+			return
+		}
+	}
+}
+
+func (m *Manager) forwardChannel(
+	ctx context.Context,
+	name string,
+	src <-chan IncomingMessage,
+	dst chan<- IncomingMessage,
+	wg *sync.WaitGroup,
+	active map[string]bool,
+	activeMu *sync.Mutex,
+) {
+	defer wg.Done()
+	defer func() {
+		activeMu.Lock()
+		delete(active, name)
+		activeMu.Unlock()
+	}()
+	for {
+		select {
+		case msg, ok := <-src:
+			if !ok {
+				return
+			}
+			select {
+			case dst <- msg:
 			case <-ctx.Done():
 				return
 			case <-m.stopCh:
@@ -121,11 +127,47 @@ func (m *Manager) mergeLoop(ctx context.Context) {
 	}
 }
 
-// Add 动态注册一个通道。
+func (m *Manager) forwardInject(
+	ctx context.Context,
+	src <-chan IncomingMessage,
+	dst chan<- IncomingMessage,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	for {
+		select {
+		case msg, ok := <-src:
+			if !ok {
+				return
+			}
+			select {
+			case dst <- msg:
+			case <-ctx.Done():
+				return
+			case <-m.stopCh:
+				return
+			}
+		case <-ctx.Done():
+			return
+		case <-m.stopCh:
+			return
+		}
+	}
+}
+
+// Add 动态注册一个通道。若 Manager 已启动，新通道会自动进入合并循环。
 func (m *Manager) Add(ch Channel) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.channels[ch.Name()] = ch
+	m.mu.Unlock()
+
+	if m.started.Load() {
+		select {
+		case m.addCh <- ch:
+		default:
+			// addCh 满时丢弃，避免阻塞
+		}
+	}
 }
 
 // Remove 动态注销一个通道并关闭它。

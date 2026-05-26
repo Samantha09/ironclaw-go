@@ -13,11 +13,15 @@ import (
 	"github.com/nearai/ironclaw-go/internal/channels/websocket"
 	"github.com/nearai/ironclaw-go/internal/config"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/document"
+	"github.com/nearai/ironclaw-go/internal/gate"
+	"github.com/nearai/ironclaw-go/internal/history"
 	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/observability"
 	"github.com/nearai/ironclaw-go/internal/safety"
 	"github.com/nearai/ironclaw-go/internal/secrets"
+	"github.com/nearai/ironclaw-go/internal/skills"
 	"github.com/nearai/ironclaw-go/internal/tools"
 	"github.com/nearai/ironclaw-go/internal/tools/builtin"
 	"github.com/nearai/ironclaw-go/internal/webhooks"
@@ -62,6 +66,12 @@ func Build(cfg config.Config) (*App, error) {
 	registry.Register(builtin.NewHTTPTool())
 	registry.Register(builtin.NewMemoryTool())
 
+	// Skills
+	skillRegistry := skills.NewRegistry()
+
+	// History
+	histStore := history.NewStore(database)
+
 	// LLM
 	var llmProvider llm.LlmProvider
 	if cfg.LLM.APIKey != "" || cfg.LLM.Provider == "ollama" {
@@ -79,14 +89,37 @@ func Build(cfg config.Config) (*App, error) {
 	safetyLayer := safety.NewLayer()
 	dispatcher := tools.NewDispatcher(registry, safetyLayer, database)
 
+	// Gate: 审批门控
+	approvalGate := gate.NewApprovalGate(func(toolName string) gate.ApprovalRequirement {
+		// 使用工具自身的审批需求声明
+		if t, ok := registry.Get(toolName); ok {
+			return t.RequiresApproval(nil)
+		}
+		return gate.UnlessAutoApproved
+	})
+	dispatcher.WithGates(approvalGate)
+	if cfg.Agent.AutoApproveTools {
+		autoList := registry.List()
+		dispatcher.WithAutoApproved(autoList)
+		logger.Info("Auto-approve all tools enabled")
+	}
+	if len(cfg.Agent.AllowedTools) > 0 {
+		logger.Info("Allowed tools restricted", slog.Any("tools", cfg.Agent.AllowedTools))
+	}
+
+	// Document extraction middleware
+	docMiddleware := document.NewMiddleware()
+
 	// Agent
 	agentDeps := agent.Deps{
-		OwnerID:    cfg.OwnerID,
-		Database:   database,
-		LLM:        llmProvider,
-		Tools:      registry,
-		Dispatcher: dispatcher,
-		Hooks:      hookRegistry,
+		OwnerID:            cfg.OwnerID,
+		Database:           database,
+		LLM:                llmProvider,
+		Tools:              registry,
+		Dispatcher:         dispatcher,
+		Hooks:              hookRegistry,
+		Skills:             skillRegistry,
+		DocumentMiddleware: docMiddleware,
 	}
 	ag := agent.New(agent.Config{
 		Name:             cfg.Agent.Name,
@@ -109,7 +142,16 @@ func Build(cfg config.Config) (*App, error) {
 	mgr.Add(replCh)
 
 	if cfg.Channels.HTTP {
-		gw := httpgw.New(cfg.Channels.HTTPPort).WithAuth(authenticator)
+		gw := httpgw.New(cfg.Channels.HTTPPort).WithAuth(authenticator).WithHistory(histStore).WithVersion(cfg.Env).WithPendingStore(dispatcher.PendingStore())
+		gw.RegisterHealthCheck("database", func(ctx context.Context) error {
+			return database.Ping(ctx)
+		})
+		gw.RegisterHealthCheck("agent", func(ctx context.Context) error {
+			if ag == nil {
+				return fmt.Errorf("agent not initialized")
+			}
+			return nil
+		})
 		gw.Start()
 		mgr.Add(gw)
 		logger.Info("HTTP Gateway started", slog.Int("port", cfg.Channels.HTTPPort))

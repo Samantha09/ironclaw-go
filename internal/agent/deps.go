@@ -2,8 +2,10 @@ package agent
 
 import (
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/document"
 	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
+	"github.com/nearai/ironclaw-go/internal/skills"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -16,10 +18,12 @@ type Config struct {
 
 // Deps — 注入的依赖。
 type Deps struct {
-	OwnerID    string
-	Database   db.Database
-	LLM        llm.LlmProvider
-	Tools      *tools.Registry
-	Dispatcher *tools.Dispatcher
-	Hooks      *hooks.Registry
+	OwnerID            string
+	Database           db.Database
+	LLM                llm.LlmProvider
+	Tools              *tools.Registry
+	Dispatcher         *tools.Dispatcher
+	Hooks              *hooks.Registry
+	Skills             *skills.Registry
+	DocumentMiddleware *document.Middleware
 }

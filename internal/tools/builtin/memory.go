@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -108,4 +109,12 @@ func (m *MemoryTool) Execute(_ context.Context, params map[string]any, jobCtx *t
 	default:
 		return tools.ToolOutput{}, fmt.Errorf("unknown action: %q", action)
 	}
+}
+
+func (m *MemoryTool) RequiresApproval(params map[string]any) gate.ApprovalRequirement {
+	action, _ := params["action"].(string)
+	if action == "set" || action == "delete" {
+		return gate.UnlessAutoApproved
+	}
+	return gate.Never
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -96,4 +97,12 @@ func (h *HTTPTool) Execute(ctx context.Context, params map[string]any, _ *tools.
 
 	content := fmt.Sprintf("Status: %s\n\n%s", resp.Status, string(data))
 	return tools.ToolOutput{Content: content}, nil
+}
+
+func (h *HTTPTool) RequiresApproval(params map[string]any) gate.ApprovalRequirement {
+	method, _ := params["method"].(string)
+	if method != "GET" && method != "HEAD" {
+		return gate.UnlessAutoApproved
+	}
+	return gate.Never
 }

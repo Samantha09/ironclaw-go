@@ -10,6 +10,7 @@ import (
 	"github.com/nearai/ironclaw-go/internal/db"
 	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
+	"github.com/nearai/ironclaw-go/internal/skills"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -33,6 +34,12 @@ func New(config Config, deps Deps) *Agent {
 
 // ProcessMessage 处理单个用户输入。
 func (a *Agent) ProcessMessage(ctx context.Context, msg channels.IncomingMessage) (channels.OutgoingResponse, error) {
+	// 文档提取：处理消息中的文档附件
+	if a.deps.DocumentMiddleware != nil {
+		a.deps.DocumentMiddleware.Process(&msg)
+		msg.Content = a.appendExtractedText(msg)
+	}
+
 	if a.deps.Hooks != nil {
 		if err := a.deps.Hooks.Trigger(ctx, hooks.Event{
 			Type:    hooks.EventBeforeMessage,
@@ -292,8 +299,15 @@ func (a *Agent) handleLLMToolCalls(ctx context.Context, userID, threadID, origin
 func (a *Agent) buildLLMMessages(userID, currentContent string) []llm.Message {
 	turns := a.sessionManager.GetTurns(userID)
 
+	system := fmt.Sprintf("你是 %s，一个安全的个人 AI 助手。", a.config.Name)
+	if a.deps.Skills != nil {
+		if skillPrompt := a.deps.Skills.BuildSystemPrompt(); skillPrompt != "" {
+			system += "\n\n" + skillPrompt
+		}
+	}
+
 	messages := []llm.Message{
-		{Role: llm.RoleSystem, Content: fmt.Sprintf("你是 %s，一个安全的个人 AI 助手。", a.config.Name)},
+		{Role: llm.RoleSystem, Content: system},
 	}
 
 	for _, turn := range turns {
@@ -307,7 +321,7 @@ func (a *Agent) buildLLMMessages(userID, currentContent string) []llm.Message {
 	return messages
 }
 
-// buildLLMTools 将工具注册表转换为 LLM 工具定义。
+// buildLLMTools 将工具注册表转换为 LLM 工具定义，并根据技能信任级别过滤。
 func (a *Agent) buildLLMTools() []llm.ToolDefinition {
 	if a.deps.Tools == nil {
 		return nil
@@ -329,7 +343,37 @@ func (a *Agent) buildLLMTools() []llm.ToolDefinition {
 			},
 		})
 	}
+
+	if a.deps.Skills != nil {
+		active := a.deps.Skills.All()
+		result := skills.AttenuateTools(defs, active)
+		return result.Tools
+	}
+
 	return defs
+}
+
+// appendExtractedText 将附件中提取的文本追加到消息内容中。
+func (a *Agent) appendExtractedText(msg channels.IncomingMessage) string {
+	if len(msg.Attachments) == 0 {
+		return msg.Content
+	}
+	var sb strings.Builder
+	sb.WriteString(msg.Content)
+	for _, att := range msg.Attachments {
+		if att.ExtractedText == "" {
+			continue
+		}
+		sb.WriteString("\n\n[Attachment: ")
+		if att.Filename != "" {
+			sb.WriteString(att.Filename)
+		} else {
+			sb.WriteString(att.MIMEType)
+		}
+		sb.WriteString("]\n")
+		sb.WriteString(att.ExtractedText)
+	}
+	return sb.String()
 }
 
 // echoReply 无 LLM 时的回退回复。

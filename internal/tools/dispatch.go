@@ -7,25 +7,31 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/safety"
 )
 
 // Dispatcher 运行安全管道并执行工具。
 type Dispatcher struct {
-	registry    *Registry
-	safety      *safety.Layer
-	rateLimiter *safety.RateLimiter
-	allowed     map[string]bool // 允许的工具白名单，nil 表示允许所有
-	database    db.Database
+	registry     *Registry
+	safety       *safety.Layer
+	rateLimiter  *safety.RateLimiter
+	allowed      map[string]bool // 允许的工具白名单，nil 表示允许所有
+	database     db.Database
+	gates        []gate.Gate
+	pendingStore *gate.PendingStore
+	autoApproved map[string]bool
 }
 
 // NewDispatcher 创建新的调度器。
 func NewDispatcher(registry *Registry, safetyLayer *safety.Layer, database db.Database) *Dispatcher {
 	return &Dispatcher{
-		registry:    registry,
-		safety:      safetyLayer,
-		rateLimiter: safety.NewRateLimiter(60, time.Minute),
-		database:    database,
+		registry:     registry,
+		safety:       safetyLayer,
+		rateLimiter:  safety.NewRateLimiter(60, time.Minute),
+		database:     database,
+		pendingStore: gate.NewPendingStore(),
+		autoApproved: make(map[string]bool),
 	}
 }
 
@@ -39,6 +45,25 @@ func NewDispatcherWithLimit(registry *Registry, safetyLayer *safety.Layer, datab
 		}
 	}
 	return d
+}
+
+// WithGates 注册执行门控。
+func (d *Dispatcher) WithGates(gates ...gate.Gate) *Dispatcher {
+	d.gates = append(d.gates, gates...)
+	return d
+}
+
+// WithAutoApproved 设置自动审批的工具列表。
+func (d *Dispatcher) WithAutoApproved(tools []string) *Dispatcher {
+	for _, name := range tools {
+		d.autoApproved[name] = true
+	}
+	return d
+}
+
+// PendingStore 返回待处理审批存储（供外部查询和解析）。
+func (d *Dispatcher) PendingStore() *gate.PendingStore {
+	return d.pendingStore
 }
 
 // Dispatch 通过名称运行工具，经过安全检查。
@@ -60,13 +85,36 @@ func (d *Dispatcher) Dispatch(ctx context.Context, toolName string, params map[s
 		return ToolOutput{}, fmt.Errorf("rate limit exceeded for tool '%s'", toolName)
 	}
 
-	// 4. 执行工具
+	// 4. 执行门控评估
+	for _, g := range d.gates {
+		gctx := &gate.GateContext{
+			ToolName:      toolName,
+			Params:        params,
+			UserID:        jobCtx.UserID,
+			ThreadID:      jobCtx.ThreadID,
+			AutoApproved:  d.autoApproved,
+			ExecutionMode: gate.Interactive,
+			Channel:       "repl",
+		}
+		decision := g.Evaluate(ctx, gctx)
+		switch decision {
+		case gate.Allow:
+			continue
+		case gate.Deny:
+			return ToolOutput{}, fmt.Errorf("tool '%s' denied by gate '%s'", toolName, g.Name())
+		case gate.Pause:
+			pg := d.pendingStore.Create(jobCtx.UserID, jobCtx.ThreadID, toolName, params, "repl")
+			return ToolOutput{}, fmt.Errorf("tool '%s' requires approval (request %s): %s", toolName, pg.RequestID, pg.Description)
+		}
+	}
+
+	// 5. 执行工具
 	start := time.Now()
 	out, err := tool.Execute(ctx, params, jobCtx)
 	out.Duration = time.Since(start).Milliseconds()
 
 	// 5. 输出净化
-	if err == nil {
+	if err == nil && d.safety != nil {
 		sanitized, sErr := d.safety.SanitizeToolOutput(ctx, out.Content)
 		if sErr != nil {
 			return ToolOutput{}, fmt.Errorf("safety check failed: %w", sErr)

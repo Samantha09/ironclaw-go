@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -29,3 +30,4 @@ func (e *EchoTool) Execute(_ context.Context, params map[string]any, _ *tools.Jo
 	}
 	return tools.ToolOutput{Content: msg}, nil
 }
+func (e *EchoTool) RequiresApproval(_ map[string]any) gate.ApprovalRequirement { return gate.Never }

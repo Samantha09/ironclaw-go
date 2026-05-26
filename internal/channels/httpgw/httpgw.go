@@ -6,26 +6,40 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/nearai/ironclaw-go/internal/auth"
 	"github.com/nearai/ironclaw-go/internal/channels"
+	"github.com/nearai/ironclaw-go/internal/gate"
+	"github.com/nearai/ironclaw-go/internal/history"
 )
 
 //go:embed static/index.html
 var staticFS embed.FS
 
+// HealthCheck 是依赖项健康检查函数。
+type HealthCheck struct {
+	Name  string
+	Check func(ctx context.Context) error
+}
+
 // Gateway 是一个 HTTP 通道，通过 REST API 接收消息并返回响应。
 type Gateway struct {
-	port      int
-	msgChan   chan channels.IncomingMessage
-	responses map[string]chan channels.OutgoingResponse // requestID -> response chan
-	mu        sync.RWMutex
-	server    *http.Server
-	shutdown  chan struct{}
+	port          int
+	msgChan       chan channels.IncomingMessage
+	responses     map[string]chan channels.OutgoingResponse // requestID -> response chan
+	mu            sync.RWMutex
+	server        *http.Server
+	shutdown      chan struct{}
 	authenticator auth.Authenticator
+	historyStore  *history.Store
+	pendingStore  *gate.PendingStore
+	healthChecks  []HealthCheck
+	startTime     time.Time
+	version       string
 }
 
 // New 创建新的 HTTP 网关通道。
@@ -35,6 +49,8 @@ func New(port int) *Gateway {
 		msgChan:   make(chan channels.IncomingMessage, 64),
 		responses: make(map[string]chan channels.OutgoingResponse),
 		shutdown:  make(chan struct{}),
+		startTime: time.Now(),
+		version:   "dev",
 	}
 }
 
@@ -44,6 +60,29 @@ func (g *Gateway) Name() string { return "http" }
 func (g *Gateway) WithAuth(a auth.Authenticator) *Gateway {
 	g.authenticator = a
 	return g
+}
+
+// WithHistory 设置 history store 以支持历史查询端点。
+func (g *Gateway) WithHistory(h *history.Store) *Gateway {
+	g.historyStore = h
+	return g
+}
+
+// WithPendingStore 设置 gate pending store 以支持审批端点。
+func (g *Gateway) WithPendingStore(ps *gate.PendingStore) *Gateway {
+	g.pendingStore = ps
+	return g
+}
+
+// WithVersion 设置服务版本号。
+func (g *Gateway) WithVersion(v string) *Gateway {
+	g.version = v
+	return g
+}
+
+// RegisterHealthCheck 注册依赖项健康检查。
+func (g *Gateway) RegisterHealthCheck(name string, check func(ctx context.Context) error) {
+	g.healthChecks = append(g.healthChecks, HealthCheck{Name: name, Check: check})
 }
 
 func (g *Gateway) Messages() <-chan channels.IncomingMessage {
@@ -82,7 +121,15 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 func (g *Gateway) Start() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/chat", g.handleChat)
+	mux.HandleFunc("/api/history/threads", g.handleHistoryThreads)
+	mux.HandleFunc("/api/history/threads/", g.handleHistoryThreadDetail)
+	mux.HandleFunc("/api/history/stats", g.handleHistoryStats)
+	mux.HandleFunc("/api/gates/pending", g.handleGatesPending)
+	mux.HandleFunc("/api/gates/approve", g.handleGateApprove)
+	mux.HandleFunc("/api/gates/deny", g.handleGateDeny)
 	mux.HandleFunc("/health", g.handleHealth)
+	mux.HandleFunc("/readyz", g.handleReadyz)
+	mux.HandleFunc("/livez", g.handleLivez)
 	mux.HandleFunc("/", g.handleIndex)
 
 	g.server = &http.Server{
@@ -165,10 +212,61 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
+	g.mu.RLock()
+	checkCount := len(g.healthChecks)
+	g.mu.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":  "ok",
-		"channel": g.Name(),
+		"status":         "ok",
+		"channel":        g.Name(),
+		"version":        g.version,
+		"uptime_seconds": int(time.Since(g.startTime).Seconds()),
+		"health_checks":  checkCount,
+	})
+}
+
+func (g *Gateway) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	g.mu.RLock()
+	checks := make([]HealthCheck, len(g.healthChecks))
+	copy(checks, g.healthChecks)
+	g.mu.RUnlock()
+
+	var failed []map[string]any
+	for _, hc := range checks {
+		if err := hc.Check(ctx); err != nil {
+			failed = append(failed, map[string]any{
+				"name":   hc.Name,
+				"status": "failed",
+				"error":  err.Error(),
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if len(failed) > 0 {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":  "not_ready",
+			"failed":  failed,
+			"checked": len(checks),
+		})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":  "ready",
+		"checked": len(checks),
+	})
+}
+
+func (g *Gateway) handleLivez(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "alive",
 	})
 }
 
@@ -196,4 +294,243 @@ type chatRequest struct {
 type chatResponse struct {
 	Content  string `json:"content"`
 	ThreadID string `json:"thread_id,omitempty"`
+}
+
+func (g *Gateway) handleHistoryThreads(w http.ResponseWriter, r *http.Request) {
+	if g.historyStore == nil {
+		http.Error(w, `{"error":"history not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID := g.authenticatedUserID(r)
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	convs, err := g.historyStore.UserConversations(r.Context(), userID, 100, 0)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"threads": convs,
+		"count":   len(convs),
+	})
+}
+
+func (g *Gateway) handleHistoryThreadDetail(w http.ResponseWriter, r *http.Request) {
+	if g.historyStore == nil {
+		http.Error(w, `{"error":"history not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	prefix := "/api/history/threads/"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		http.NotFound(w, r)
+		return
+	}
+	threadID := strings.TrimPrefix(r.URL.Path, prefix)
+	if threadID == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		msgs, err := g.historyStore.ThreadHistory(r.Context(), threadID, 1000, 0)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"thread_id": threadID,
+			"messages":  msgs,
+			"count":     len(msgs),
+		})
+	case http.MethodDelete:
+		if err := g.historyStore.DeleteThread(r.Context(), threadID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (g *Gateway) handleHistoryStats(w http.ResponseWriter, r *http.Request) {
+	if g.historyStore == nil {
+		http.Error(w, `{"error":"history not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stats, err := g.historyStore.GetJobStats(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	toolStats, err := g.historyStore.GetToolStats(r.Context())
+	if err != nil {
+		toolStats = nil
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"jobs":  stats,
+		"tools": toolStats,
+	})
+}
+
+func (g *Gateway) authenticatedUserID(r *http.Request) string {
+	if g.authenticator == nil {
+		return ""
+	}
+	apiKey := r.Header.Get("X-API-Key")
+	if apiKey == "" {
+		apiKey = r.URL.Query().Get("api_key")
+	}
+	userID, err := g.authenticator.Authenticate(r.Context(), apiKey)
+	if err != nil {
+		return ""
+	}
+	return userID
+}
+
+func (g *Gateway) handleGatesPending(w http.ResponseWriter, r *http.Request) {
+	if g.pendingStore == nil {
+		http.Error(w, `{"error":"gate pending store not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID := g.authenticatedUserID(r)
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	all := g.pendingStore.List()
+	var filtered []map[string]any
+	for _, pg := range all {
+		if pg.UserID == userID {
+			filtered = append(filtered, map[string]any{
+				"request_id":   pg.RequestID,
+				"tool_name":    pg.ToolName,
+				"description":  pg.Description,
+				"created_at":   pg.CreatedAt,
+				"expires_at":   pg.ExpiresAt,
+				"thread_id":    pg.ThreadID,
+				"source_channel": pg.SourceChannel,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"gates": filtered,
+		"count": len(filtered),
+	})
+}
+
+func (g *Gateway) handleGateApprove(w http.ResponseWriter, r *http.Request) {
+	if g.pendingStore == nil {
+		http.Error(w, `{"error":"gate pending store not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		RequestID string `json:"request_id"`
+		UserID    string `json:"user_id"`
+		ThreadID  string `json:"thread_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"invalid json: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	if req.UserID == "" {
+		req.UserID = g.authenticatedUserID(r)
+	}
+	if req.UserID == "" {
+		req.UserID = "anonymous"
+	}
+	if req.ThreadID == "" {
+		http.Error(w, `{"error":"thread_id is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	pg, err := g.pendingStore.Resolve(req.UserID, req.ThreadID, req.RequestID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"approved":   true,
+		"request_id": req.RequestID,
+		"tool_name":  pg.ToolName,
+	})
+}
+
+func (g *Gateway) handleGateDeny(w http.ResponseWriter, r *http.Request) {
+	if g.pendingStore == nil {
+		http.Error(w, `{"error":"gate pending store not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		RequestID string `json:"request_id"`
+		UserID    string `json:"user_id"`
+		ThreadID  string `json:"thread_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"invalid json: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	if req.UserID == "" {
+		req.UserID = g.authenticatedUserID(r)
+	}
+	if req.UserID == "" {
+		req.UserID = "anonymous"
+	}
+	if req.ThreadID == "" {
+		http.Error(w, `{"error":"thread_id is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err := g.pendingStore.Deny(req.UserID, req.ThreadID, req.RequestID); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"denied":     true,
+		"request_id": req.RequestID,
+	})
 }

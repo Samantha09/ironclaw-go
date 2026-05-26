@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/tools"
 	"github.com/nearai/ironclaw-go/internal/workspace"
 )
@@ -91,4 +92,12 @@ func (f *FileTool) Execute(ctx context.Context, params map[string]any, jobCtx *t
 	default:
 		return tools.ToolOutput{}, fmt.Errorf("unknown action: %q", action)
 	}
+}
+
+func (f *FileTool) RequiresApproval(params map[string]any) gate.ApprovalRequirement {
+	action, _ := params["action"].(string)
+	if action == "write" || action == "delete" || action == "mkdir" {
+		return gate.UnlessAutoApproved
+	}
+	return gate.Never
 }

@@ -1,6 +1,10 @@
 package tools
 
-import "context"
+import (
+	"context"
+
+	"github.com/nearai/ironclaw-go/internal/gate"
+)
 
 // JobContext — execution context for a tool invocation.
 type JobContext struct {
@@ -22,4 +26,6 @@ type Tool interface {
 	Description() string
 	ParameterSchema() map[string]any
 	Execute(ctx context.Context, params map[string]any, jobCtx *JobContext) (ToolOutput, error)
+	// RequiresApproval 返回此工具调用的审批需求级别。
+	RequiresApproval(params map[string]any) gate.ApprovalRequirement
 }

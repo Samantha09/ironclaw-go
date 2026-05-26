@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -46,3 +47,4 @@ func (j *JSONTool) Execute(_ context.Context, params map[string]any, _ *tools.Jo
 	}
 	return tools.ToolOutput{Content: string(out)}, nil
 }
+func (j *JSONTool) RequiresApproval(_ map[string]any) gate.ApprovalRequirement { return gate.Never }

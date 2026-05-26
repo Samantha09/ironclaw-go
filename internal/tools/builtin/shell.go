@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -44,6 +45,8 @@ func (s *ShellTool) Execute(ctx context.Context, params map[string]any, _ *tools
 	timeoutSec := 30
 	if t, ok := params["timeout"].(float64); ok {
 		timeoutSec = int(t)
+	} else if t, ok := params["timeout"].(int); ok {
+		timeoutSec = t
 	}
 
 	// 安全检查：禁止危险命令
@@ -70,4 +73,8 @@ func (s *ShellTool) Execute(ctx context.Context, params map[string]any, _ *tools
 	}
 
 	return tools.ToolOutput{Content: content}, nil
+}
+
+func (s *ShellTool) RequiresApproval(_ map[string]any) gate.ApprovalRequirement {
+	return gate.UnlessAutoApproved
 }

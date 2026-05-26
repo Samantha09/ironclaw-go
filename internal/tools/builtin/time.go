@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
 
@@ -19,3 +20,4 @@ func (t *TimeTool) ParameterSchema() map[string]any {
 func (t *TimeTool) Execute(_ context.Context, _ map[string]any, _ *tools.JobContext) (tools.ToolOutput, error) {
 	return tools.ToolOutput{Content: time.Now().UTC().Format(time.RFC3339)}, nil
 }
+func (t *TimeTool) RequiresApproval(_ map[string]any) gate.ApprovalRequirement { return gate.Never }

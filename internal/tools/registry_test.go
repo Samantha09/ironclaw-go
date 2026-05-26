@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/safety"
 )
 
@@ -75,3 +76,4 @@ func (m *mockTool) Execute(_ context.Context, params map[string]any, _ *JobConte
 	msg, _ := params["message"].(string)
 	return ToolOutput{Content: msg}, nil
 }
+func (m *mockTool) RequiresApproval(_ map[string]any) gate.ApprovalRequirement { return gate.Never }

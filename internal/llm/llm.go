@@ -98,6 +98,8 @@ func New(provider, model, apiKey, baseURL string) (LlmProvider, error) {
 		return NewOpenAIClientWithEndpoint(model, apiKey, baseURL, "/text/chatcompletion_v2"), nil
 	case "ollama":
 		return NewOllamaClient(model, baseURL), nil
+	case "gemini":
+		return NewGeminiClient(model, apiKey, baseURL), nil
 	default:
 		return nil, nil
 	}
