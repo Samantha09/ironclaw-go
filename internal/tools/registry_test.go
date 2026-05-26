@@ -44,7 +44,7 @@ func TestDispatcher(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(&mockTool{name: "echo"})
 
-	disp := NewDispatcher(reg, safety.NewLayer())
+	disp := NewDispatcher(reg, safety.NewLayer(), nil)
 
 	ctx := context.Background()
 	out, err := disp.Dispatch(ctx, "echo", map[string]any{"message": "hello"}, &JobContext{UserID: "user1"})

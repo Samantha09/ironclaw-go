@@ -16,20 +16,22 @@ type Dispatcher struct {
 	safety      *safety.Layer
 	rateLimiter *safety.RateLimiter
 	allowed     map[string]bool // 允许的工具白名单，nil 表示允许所有
+	database    db.Database
 }
 
 // NewDispatcher 创建新的调度器。
-func NewDispatcher(registry *Registry, safetyLayer *safety.Layer) *Dispatcher {
+func NewDispatcher(registry *Registry, safetyLayer *safety.Layer, database db.Database) *Dispatcher {
 	return &Dispatcher{
 		registry:    registry,
 		safety:      safetyLayer,
 		rateLimiter: safety.NewRateLimiter(60, time.Minute),
+		database:    database,
 	}
 }
 
 // NewDispatcherWithLimit 创建带白名单的调度器。
-func NewDispatcherWithLimit(registry *Registry, safetyLayer *safety.Layer, allowed []string) *Dispatcher {
-	d := NewDispatcher(registry, safetyLayer)
+func NewDispatcherWithLimit(registry *Registry, safetyLayer *safety.Layer, database db.Database, allowed []string) *Dispatcher {
+	d := NewDispatcher(registry, safetyLayer, database)
 	if len(allowed) > 0 {
 		d.allowed = make(map[string]bool)
 		for _, name := range allowed {
@@ -82,9 +84,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, toolName string, params map[s
 	return out, nil
 }
 
-// audit 记录工具调用审计日志。
+// audit 记录工具调用审计日志。在后台 goroutine 中异步持久化到数据库。
 func (d *Dispatcher) audit(jobCtx *JobContext, toolName string, params map[string]any, out ToolOutput, execErr error) {
-	// MVP: 仅打印到标准输出，后续可持久化到数据库
+	if d.database == nil {
+		return
+	}
+
 	status := "success"
 	errStr := ""
 	if execErr != nil {
@@ -98,7 +103,7 @@ func (d *Dispatcher) audit(jobCtx *JobContext, toolName string, params map[strin
 		paramsJSON = fmt.Sprintf("%v", params)
 	}
 
-	_ = db.ActionRecord{
+	rec := db.ActionRecord{
 		ID:        uuid.New().String(),
 		JobID:     jobCtx.JobID,
 		ToolName:  toolName,
@@ -109,10 +114,13 @@ func (d *Dispatcher) audit(jobCtx *JobContext, toolName string, params map[strin
 		CreatedAt: time.Now(),
 	}
 
-	// TODO: 持久化到数据库
-	// if d.database != nil {
-	//     d.database.SaveActionRecord(context.Background(), &rec)
-	// }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if saveErr := d.database.SaveActionRecord(ctx, &rec); saveErr != nil {
+		// 审计失败不应影响主流程，仅静默记录
+		_ = fmt.Errorf("audit save failed: %w", saveErr)
+	}
 
 	_ = status
 }

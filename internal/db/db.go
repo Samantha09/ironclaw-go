@@ -100,13 +100,12 @@ type Database interface {
 }
 
 // New 根据驱动创建数据库实例。
-func New(driver, dsn string) (Database, error) {
+func New(driver, dsn string, maxConns, minConns int) (Database, error) {
 	switch driver {
 	case "memory":
 		return NewMemoryDB(), nil
 	case "postgres":
-		// TODO: 实现 PostgreSQL 后端
-		return nil, fmt.Errorf("postgres driver not yet implemented")
+		return NewPostgresDB(dsn, maxConns, minConns)
 	case "libsql":
 		// TODO: 实现 libSQL 后端
 		return nil, fmt.Errorf("libsql driver not yet implemented")

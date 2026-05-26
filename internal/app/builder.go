@@ -9,13 +9,14 @@ import (
 	"github.com/nearai/ironclaw-go/internal/channels/httpgw"
 	"github.com/nearai/ironclaw-go/internal/channels/repl"
 	"github.com/nearai/ironclaw-go/internal/config"
-	"github.com/nearai/ironclaw-go/internal/webhooks"
 	"github.com/nearai/ironclaw-go/internal/db"
 	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/safety"
 	"github.com/nearai/ironclaw-go/internal/secrets"
 	"github.com/nearai/ironclaw-go/internal/tools"
 	"github.com/nearai/ironclaw-go/internal/tools/builtin"
+	"github.com/nearai/ironclaw-go/internal/webhooks"
+	"github.com/nearai/ironclaw-go/internal/workspace"
 )
 
 // App — fully wired application.
@@ -29,10 +30,16 @@ type App struct {
 // Build wires all components.
 func Build(cfg config.Config) (*App, error) {
 	// Database
-	database := db.NewMemoryDB()
+	database, err := db.New(cfg.Database.Driver, cfg.Database.DSN, cfg.Database.MaxConns, cfg.Database.MinConns)
+	if err != nil {
+		return nil, fmt.Errorf("init database: %w", err)
+	}
 
 	// Secrets
 	_, _ = secrets.NewStoreFromEnv()
+
+	// Workspace
+	ws := workspace.NewFSWorkspace("./workspaces")
 
 	// Tools
 	registry := tools.NewRegistry()
@@ -40,7 +47,7 @@ func Build(cfg config.Config) (*App, error) {
 	registry.Register(builtin.NewTimeTool())
 	registry.Register(builtin.NewJSONTool())
 	registry.Register(builtin.NewShellTool())
-	registry.Register(builtin.NewFileTool())
+	registry.Register(builtin.NewFileTool(ws))
 	registry.Register(builtin.NewHTTPTool())
 	registry.Register(builtin.NewMemoryTool())
 
@@ -56,7 +63,7 @@ func Build(cfg config.Config) (*App, error) {
 
 	// Safety + Dispatcher
 	safetyLayer := safety.NewLayer()
-	dispatcher := tools.NewDispatcher(registry, safetyLayer)
+	dispatcher := tools.NewDispatcher(registry, safetyLayer, database)
 
 	// Agent
 	agentDeps := agent.Deps{

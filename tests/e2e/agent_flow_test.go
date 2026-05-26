@@ -57,7 +57,7 @@ func setupAgent(t *testing.T) (*agent.Agent, *mockChannel, *channels.Manager) {
 	registry.Register(builtin.NewMemoryTool())
 
 	safetyLayer := safety.NewLayer()
-	dispatcher := tools.NewDispatcher(registry, safetyLayer)
+	dispatcher := tools.NewDispatcher(registry, safetyLayer, nil)
 
 	deps := agent.Deps{
 		OwnerID:    "test_user",
