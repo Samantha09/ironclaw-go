@@ -20,6 +20,7 @@ import (
 	"github.com/nearai/ironclaw-go/internal/tools"
 	"github.com/nearai/ironclaw-go/internal/tools/builtin"
 	"github.com/nearai/ironclaw-go/internal/webhooks"
+	"github.com/nearai/ironclaw-go/internal/worker"
 	"github.com/nearai/ironclaw-go/internal/workspace"
 )
 
@@ -30,6 +31,7 @@ type App struct {
 	Agent    *agent.Agent
 	Channels *channels.Manager
 	Logger   *observability.Logger
+	Worker   *worker.Pool
 }
 
 // Build wires all components.
@@ -118,16 +120,22 @@ func Build(cfg config.Config) (*App, error) {
 
 	mgr.Start(context.Background())
 
+	// Worker Pool
+	wp := worker.NewPool(database, dispatcher, cfg.Agent.MaxParallelJobs)
+	wp.Start(context.Background())
+	logger.Info("Worker pool started", slog.Int("max_parallel", cfg.Agent.MaxParallelJobs))
+
 	return &App{
 		Config:   cfg,
 		DB:       database,
 		Agent:    ag,
 		Channels: mgr,
 		Logger:   logger,
+		Worker:   wp,
 	}, nil
 }
 
-// Run starts the agent loop.
+// Run starts the agent loop and blocks until context cancellation.
 func (a *App) Run(ctx context.Context) error {
 	a.Logger.Info("IronClaw starting",
 		slog.String("name", a.Config.Agent.Name),
@@ -136,5 +144,7 @@ func (a *App) Run(ctx context.Context) error {
 	fmt.Println("Type 'quit' or 'exit' to stop.")
 	fmt.Println()
 
-	return a.Agent.Run(ctx, a.Channels)
+	err := a.Agent.Run(ctx, a.Channels)
+	a.Worker.Stop()
+	return err
 }

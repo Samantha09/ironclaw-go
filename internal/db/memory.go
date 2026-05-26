@@ -206,9 +206,10 @@ func (m *MemoryDB) ListJobs(_ context.Context, userID string, limit, offset int)
 
 	var result []*Job
 	for _, job := range m.jobs {
-		if job.UserID == userID {
-			result = append(result, job)
+		if userID != "" && job.UserID != userID {
+			continue
 		}
+		result = append(result, job)
 	}
 
 	if offset >= len(result) {

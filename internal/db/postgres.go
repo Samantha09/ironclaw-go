@@ -356,13 +356,19 @@ func (p *PostgresDB) ListJobs(ctx context.Context, userID string, limit, offset 
 		limit = 100
 	}
 
-	rows, err := p.pool.Query(ctx, `
+	query := `
 		SELECT id, user_id, name, status, input, output, error, created_at, updated_at
 		FROM jobs
-		WHERE user_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
-	`, userID, limit, offset)
+	`
+	var rows pgx.Rows
+	var err error
+	if userID != "" {
+		query += "WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+		rows, err = p.pool.Query(ctx, query, userID, limit, offset)
+	} else {
+		query += "ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+		rows, err = p.pool.Query(ctx, query, limit, offset)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
