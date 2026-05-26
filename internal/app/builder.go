@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/nearai/ironclaw-go/internal/agent"
 	"github.com/nearai/ironclaw-go/internal/channels"
@@ -13,6 +14,7 @@ import (
 	"github.com/nearai/ironclaw-go/internal/db"
 	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
+	"github.com/nearai/ironclaw-go/internal/observability"
 	"github.com/nearai/ironclaw-go/internal/safety"
 	"github.com/nearai/ironclaw-go/internal/secrets"
 	"github.com/nearai/ironclaw-go/internal/tools"
@@ -27,10 +29,14 @@ type App struct {
 	DB       db.Database
 	Agent    *agent.Agent
 	Channels *channels.Manager
+	Logger   *observability.Logger
 }
 
 // Build wires all components.
 func Build(cfg config.Config) (*App, error) {
+	// Logger
+	logger := observability.NewLogger(cfg.LogLevel)
+
 	// Database
 	database, err := db.New(cfg.Database.Driver, cfg.Database.DSN, cfg.Database.MaxConns, cfg.Database.MinConns)
 	if err != nil {
@@ -94,20 +100,20 @@ func Build(cfg config.Config) (*App, error) {
 		gw := httpgw.New(cfg.Channels.HTTPPort)
 		gw.Start()
 		mgr.Add(gw)
-		fmt.Printf("HTTP Gateway listening on :%d\n", cfg.Channels.HTTPPort)
+		logger.Info("HTTP Gateway started", slog.Int("port", cfg.Channels.HTTPPort))
 	}
 
 	// Webhook 服务器（固定使用 HTTPPort+1）
 	wh := webhooks.NewServer(cfg.Channels.HTTPPort + 1)
 	wh.Start()
 	mgr.Add(wh)
-	fmt.Printf("Webhook server listening on :%d\n", cfg.Channels.HTTPPort+1)
+	logger.Info("Webhook server started", slog.Int("port", cfg.Channels.HTTPPort+1))
 
 	if cfg.Channels.WebSocket {
 		wsCh := websocket.New(cfg.Channels.WebSocketPort)
 		wsCh.Start()
 		mgr.Add(wsCh)
-		fmt.Printf("WebSocket server listening on :%d/ws\n", cfg.Channels.WebSocketPort)
+		logger.Info("WebSocket server started", slog.Int("port", cfg.Channels.WebSocketPort))
 	}
 
 	mgr.Start(context.Background())
@@ -117,13 +123,16 @@ func Build(cfg config.Config) (*App, error) {
 		DB:       database,
 		Agent:    ag,
 		Channels: mgr,
+		Logger:   logger,
 	}, nil
 }
 
 // Run starts the agent loop.
 func (a *App) Run(ctx context.Context) error {
-	fmt.Printf("IronClaw %s starting...\n", a.Config.Agent.Name)
-	fmt.Printf("Channels: %v\n", a.Channels.Names())
+	a.Logger.Info("IronClaw starting",
+		slog.String("name", a.Config.Agent.Name),
+		slog.Any("channels", a.Channels.Names()),
+	)
 	fmt.Println("Type 'quit' or 'exit' to stop.")
 	fmt.Println()
 
