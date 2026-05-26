@@ -8,6 +8,7 @@ import (
 	"github.com/nearai/ironclaw-go/internal/agent"
 	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/safety"
 	"github.com/nearai/ironclaw-go/internal/tools"
 	"github.com/nearai/ironclaw-go/internal/tools/builtin"
@@ -64,6 +65,7 @@ func setupAgent(t *testing.T) (*agent.Agent, *mockChannel, *channels.Manager) {
 		Database:   db.NewMemoryDB(),
 		Tools:      registry,
 		Dispatcher: dispatcher,
+		Hooks:      hooks.NewRegistry(),
 	}
 
 	ag := agent.New(agent.Config{

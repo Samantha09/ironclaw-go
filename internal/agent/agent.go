@@ -8,6 +8,7 @@ import (
 
 	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/tools"
 )
@@ -32,20 +33,56 @@ func New(config Config, deps Deps) *Agent {
 
 // ProcessMessage 处理单个用户输入。
 func (a *Agent) ProcessMessage(ctx context.Context, msg channels.IncomingMessage) (channels.OutgoingResponse, error) {
+	if a.deps.Hooks != nil {
+		if err := a.deps.Hooks.Trigger(ctx, hooks.Event{
+			Type:    hooks.EventBeforeMessage,
+			UserID:  msg.UserID,
+			Channel: msg.Channel,
+			Data:    map[string]any{"content": msg.Content},
+		}); err != nil {
+			return channels.OutgoingResponse{}, fmt.Errorf("before:message hook rejected: %w", err)
+		}
+	}
+
 	intent := a.router.Route(msg.Content)
+
+	var resp channels.OutgoingResponse
+	var err error
 
 	switch intent.Type {
 	case IntentSystemCmd:
-		return a.handleSystemCommand(ctx, msg.UserID, intent)
+		resp, err = a.handleSystemCommand(ctx, msg.UserID, intent)
 	case IntentToolCall:
-		return a.handleToolInvocation(ctx, msg.UserID, intent)
+		resp, err = a.handleToolInvocation(ctx, msg.UserID, intent)
 	case IntentLLMQuery:
-		return a.handleLLMQuery(ctx, msg.UserID, intent)
+		resp, err = a.handleLLMQuery(ctx, msg.UserID, intent)
 	case IntentChat:
-		return a.handleChat(ctx, msg.UserID, intent)
+		resp, err = a.handleChat(ctx, msg.UserID, intent)
 	default:
-		return channels.OutgoingResponse{Content: "无法识别的意图类型"}, nil
+		resp = channels.OutgoingResponse{Content: "无法识别的意图类型"}
 	}
+
+	if err != nil {
+		resp = channels.OutgoingResponse{Content: fmt.Sprintf("Agent 错误: %v", err)}
+	}
+
+	if a.deps.Hooks != nil {
+		_ = a.deps.Hooks.Trigger(ctx, hooks.Event{
+			Type:    hooks.EventAfterMessage,
+			UserID:  msg.UserID,
+			Channel: msg.Channel,
+			Data:    map[string]any{"content": msg.Content, "response": resp.Content},
+		})
+
+		_ = a.deps.Hooks.Trigger(ctx, hooks.Event{
+			Type:    hooks.EventBeforeResponse,
+			UserID:  msg.UserID,
+			Channel: msg.Channel,
+			Data:    map[string]any{"response": resp.Content},
+		})
+	}
+
+	return resp, nil
 }
 
 // handleSystemCommand 处理系统命令。
@@ -110,10 +147,37 @@ func (a *Agent) handleToolInvocation(ctx context.Context, userID string, intent 
 		}
 	}
 
+	if a.deps.Hooks != nil {
+		if err := a.deps.Hooks.Trigger(ctx, hooks.Event{
+			Type:   hooks.EventBeforeToolCall,
+			UserID: userID,
+			Data:   map[string]any{"tool": intent.ToolName, "params": params},
+		}); err != nil {
+			return channels.OutgoingResponse{}, fmt.Errorf("before:tool_call hook rejected: %w", err)
+		}
+	}
+
 	out, err := a.deps.Dispatcher.Dispatch(ctx, intent.ToolName, params, &tools.JobContext{
 		UserID:   userID,
 		ThreadID: thread.ID,
 	})
+
+	if a.deps.Hooks != nil {
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		_ = a.deps.Hooks.Trigger(ctx, hooks.Event{
+			Type:   hooks.EventAfterToolCall,
+			UserID: userID,
+			Data: map[string]any{
+				"tool":     intent.ToolName,
+				"output":   out.Content,
+				"error":    errStr,
+				"duration": out.Duration,
+			},
+		})
+	}
 
 	turn := Turn{
 		UserMsg:   intent.Content,

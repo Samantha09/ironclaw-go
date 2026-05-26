@@ -11,6 +11,7 @@ import (
 	"github.com/nearai/ironclaw-go/internal/channels/websocket"
 	"github.com/nearai/ironclaw-go/internal/config"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/safety"
 	"github.com/nearai/ironclaw-go/internal/secrets"
@@ -62,6 +63,9 @@ func Build(cfg config.Config) (*App, error) {
 		llmProvider = p
 	}
 
+	// Hooks
+	hookRegistry := hooks.NewRegistry()
+
 	// Safety + Dispatcher
 	safetyLayer := safety.NewLayer()
 	dispatcher := tools.NewDispatcher(registry, safetyLayer, database)
@@ -73,6 +77,7 @@ func Build(cfg config.Config) (*App, error) {
 		LLM:        llmProvider,
 		Tools:      registry,
 		Dispatcher: dispatcher,
+		Hooks:      hookRegistry,
 	}
 	ag := agent.New(agent.Config{
 		Name:             cfg.Agent.Name,
