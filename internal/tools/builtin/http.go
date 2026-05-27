@@ -100,7 +100,13 @@ func (h *HTTPTool) Execute(ctx context.Context, params map[string]any, _ *tools.
 }
 
 func (h *HTTPTool) RequiresApproval(params map[string]any) gate.ApprovalRequirement {
+	if params == nil {
+		return gate.UnlessAutoApproved
+	}
 	method, _ := params["method"].(string)
+	if method == "" {
+		return gate.UnlessAutoApproved
+	}
 	if method != "GET" && method != "HEAD" {
 		return gate.UnlessAutoApproved
 	}

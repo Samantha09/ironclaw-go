@@ -3,6 +3,7 @@ package agent
 import (
 	"github.com/nearai/ironclaw-go/internal/db"
 	"github.com/nearai/ironclaw-go/internal/document"
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/skills"
@@ -23,6 +24,7 @@ type Deps struct {
 	LLM                llm.LlmProvider
 	Tools              *tools.Registry
 	Dispatcher         *tools.Dispatcher
+	PendingStore       *gate.PendingStore
 	Hooks              *hooks.Registry
 	Skills             *skills.Registry
 	DocumentMiddleware *document.Middleware

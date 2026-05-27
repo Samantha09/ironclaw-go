@@ -6,7 +6,26 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/llm"
 )
+
+// PendingExecution 保存 Agent 被 gate Pause 中断时的执行状态。
+type PendingExecution struct {
+	RequestID       string
+	UserID          string
+	ThreadID        string
+	Messages        []llm.Message
+	ToolCalls       []llm.ToolCall
+	NextIndex       int
+	OriginalContent string
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+}
+
+// IsExpired 检查 pending execution 是否已过期。
+func (pe *PendingExecution) IsExpired() bool {
+	return time.Now().After(pe.ExpiresAt)
+}
 
 // Thread 表示一个对话线程。
 type Thread struct {
@@ -30,15 +49,17 @@ type Turn struct {
 
 // SessionManager 管理用户会话和对话线程。
 type SessionManager struct {
-	mu     sync.RWMutex
-	active map[string]*Thread // userID -> current thread
-	history map[string][]*Thread // userID -> threads
+	mu                sync.RWMutex
+	active            map[string]*Thread         // userID -> current thread
+	history           map[string][]*Thread       // userID -> threads
+	pendingExecutions map[string]*PendingExecution // key: userID + "/" + threadID
 }
 
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		active:  make(map[string]*Thread),
-		history: make(map[string][]*Thread),
+		active:            make(map[string]*Thread),
+		history:           make(map[string][]*Thread),
+		pendingExecutions: make(map[string]*PendingExecution),
 	}
 }
 
@@ -146,4 +167,29 @@ func (sm *SessionManager) CompactThread(userID string, maxTurns int) {
 
 	// 保留最近的 maxTurns 个轮次
 	thread.Turns = thread.Turns[len(thread.Turns)-maxTurns:]
+}
+
+// SavePendingExecution 保存中断的执行状态。
+func (sm *SessionManager) SavePendingExecution(pe *PendingExecution) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.pendingExecutions[pe.ThreadID] = pe
+}
+
+// GetPendingExecution 获取用户的待恢复执行状态。
+func (sm *SessionManager) GetPendingExecution(userID, threadID string) *PendingExecution {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	pe, ok := sm.pendingExecutions[threadID]
+	if !ok || pe.IsExpired() {
+		return nil
+	}
+	return pe
+}
+
+// ClearPendingExecution 清除用户的待恢复执行状态。
+func (sm *SessionManager) ClearPendingExecution(userID, threadID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.pendingExecutions, threadID)
 }

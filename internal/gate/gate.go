@@ -3,6 +3,7 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -80,6 +81,23 @@ type PendingGate struct {
 // IsExpired 检查门控是否已过期（默认 10 分钟）。
 func (p *PendingGate) IsExpired() bool {
 	return time.Now().After(p.ExpiresAt)
+}
+
+// PauseError 表示门控暂停，需要用户审批。
+type PauseError struct {
+	ToolName    string
+	RequestID   string
+	Description string
+}
+
+func (e *PauseError) Error() string {
+	return fmt.Sprintf("tool '%s' requires approval (request %s): %s", e.ToolName, e.RequestID, e.Description)
+}
+
+// IsPauseError 检查错误是否是 PauseError。
+func IsPauseError(err error) bool {
+	var pe *PauseError
+	return errors.As(err, &pe)
 }
 
 // GateError 是门控相关的错误。

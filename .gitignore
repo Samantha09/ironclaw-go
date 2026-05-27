@@ -2,6 +2,7 @@
 /ironclaw
 *.exe
 .env
+.env.local
 /vendor
 *.zip
 /wasm-runtime/target/

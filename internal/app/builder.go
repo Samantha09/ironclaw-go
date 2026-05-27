@@ -89,13 +89,10 @@ func Build(cfg config.Config) (*App, error) {
 	safetyLayer := safety.NewLayer()
 	dispatcher := tools.NewDispatcher(registry, safetyLayer, database)
 
-	// Gate: 审批门控
-	approvalGate := gate.NewApprovalGate(func(toolName string) gate.ApprovalRequirement {
-		// 使用工具自身的审批需求声明
-		if t, ok := registry.Get(toolName); ok {
-			return t.RequiresApproval(nil)
-		}
-		return gate.UnlessAutoApproved
+	// Gate: 审批门控（基于风险策略）
+	riskEvaluator := gate.NewRiskBasedEvaluator(gate.TrustBalanced)
+	approvalGate := gate.NewApprovalGate(func(toolName string, params map[string]any, userID string) gate.ApprovalRequirement {
+		return riskEvaluator.Evaluate(toolName, params, userID)
 	})
 	dispatcher.WithGates(approvalGate)
 	if cfg.Agent.AutoApproveTools {
@@ -117,6 +114,7 @@ func Build(cfg config.Config) (*App, error) {
 		LLM:                llmProvider,
 		Tools:              registry,
 		Dispatcher:         dispatcher,
+		PendingStore:       dispatcher.PendingStore(),
 		Hooks:              hookRegistry,
 		Skills:             skillRegistry,
 		DocumentMiddleware: docMiddleware,
@@ -142,7 +140,7 @@ func Build(cfg config.Config) (*App, error) {
 	mgr.Add(replCh)
 
 	if cfg.Channels.HTTP {
-		gw := httpgw.New(cfg.Channels.HTTPPort).WithAuth(authenticator).WithHistory(histStore).WithVersion(cfg.Env).WithPendingStore(dispatcher.PendingStore())
+		gw := httpgw.New(cfg.Channels.HTTPPort).WithAuth(authenticator).WithHistory(histStore).WithVersion(cfg.Env).WithPendingStore(dispatcher.PendingStore()).WithRiskEvaluator(riskEvaluator)
 		gw.RegisterHealthCheck("database", func(ctx context.Context) error {
 			return database.Ping(ctx)
 		})

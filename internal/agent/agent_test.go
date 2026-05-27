@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/db"
@@ -265,7 +266,8 @@ func TestAgentHandleLLMToolCalls(t *testing.T) {
 		},
 	}
 
-	result, err := ag.handleLLMToolCalls(ctx, "user1", "thread1", "original", resp)
+	messages := ag.buildLLMMessages("user1", "original")
+	result, err := ag.handleLLMToolCalls(ctx, "user1", "thread1", "original", messages, resp)
 	if err != nil {
 		t.Fatalf("handleLLMToolCalls: %v", err)
 	}
@@ -287,4 +289,197 @@ func TestAgentPersistIfNeeded(t *testing.T) {
 	ag := New(Config{Name: "Test"}, Deps{})
 	thread := ag.sessionManager.GetOrCreateThread("user1", "repl")
 	ag.persistIfNeeded(context.Background(), thread)
+}
+
+// pauseTool 是一个模拟工具，执行时总是触发 gate Pause。
+type pauseTool struct{}
+
+func (p *pauseTool) Name() string        { return "pause_tool" }
+func (p *pauseTool) Description() string { return "always pauses" }
+func (p *pauseTool) ParameterSchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (p *pauseTool) Execute(_ context.Context, _ map[string]any, _ *tools.JobContext) (tools.ToolOutput, error) {
+	return tools.ToolOutput{Content: "should not reach"}, nil
+}
+func (p *pauseTool) RequiresApproval(_ map[string]any) gate.ApprovalRequirement {
+	return gate.Always
+}
+
+func TestAgentHandleLLMToolCallsPause(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(&pauseTool{})
+	registry.Register(&mockTool{name: "safe", description: "safe", output: "ok", approvalReq: gate.Never})
+
+	dispatcher := tools.NewDispatcher(registry, nil, db.NewMemoryDB())
+	approvalGate := gate.NewApprovalGate(func(toolName string, params map[string]any, _ string) gate.ApprovalRequirement {
+		if toolName == "pause_tool" {
+			return gate.Always
+		}
+		return gate.Never
+	})
+	dispatcher.WithGates(approvalGate)
+
+	ag := New(Config{Name: "TestAgent"}, Deps{
+		LLM:        &mockLLM{respondWith: "summarized"},
+		Tools:      registry,
+		Dispatcher: dispatcher,
+	})
+	ctx := context.Background()
+	ag.sessionManager.GetOrCreateThread("user1", "repl")
+
+	resp := llm.CompletionResponse{
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Function: llm.FunctionCall{Name: "safe", Arguments: `{}`}},
+			{ID: "call_2", Function: llm.FunctionCall{Name: "pause_tool", Arguments: `{}`}},
+		},
+	}
+
+	messages := ag.buildLLMMessages("user1", "original")
+	result, err := ag.handleLLMToolCalls(ctx, "user1", "thread1", "original", messages, resp)
+	if err != nil {
+		t.Fatalf("handleLLMToolCalls: %v", err)
+	}
+	if result.Status != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", result.Status)
+	}
+
+	// 验证 PendingExecution 被保存
+	pe := ag.sessionManager.GetPendingExecution("user1", "thread1")
+	if pe == nil {
+		t.Fatal("expected pending execution to be saved")
+	}
+	if pe.NextIndex != 1 {
+		t.Errorf("nextIndex = %d, want 1", pe.NextIndex)
+	}
+	if len(pe.ToolCalls) != 2 {
+		t.Errorf("toolCalls = %d, want 2", len(pe.ToolCalls))
+	}
+}
+
+func TestAgentResume(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(&mockTool{name: "echo", description: "echo", output: "echoed", approvalReq: gate.Never})
+
+	dispatcher := tools.NewDispatcher(registry, nil, db.NewMemoryDB())
+	dispatcher.WithGates()
+
+	ag := New(Config{Name: "TestAgent"}, Deps{
+		LLM:        &mockLLM{respondWith: "final summary"},
+		Tools:      registry,
+		Dispatcher: dispatcher,
+	})
+	ctx := context.Background()
+	ag.sessionManager.GetOrCreateThread("user1", "repl")
+
+	// 手动构造 PendingExecution
+	pe := &PendingExecution{
+		RequestID:       "test-req",
+		UserID:          "user1",
+		ThreadID:        "thread1",
+		Messages:        ag.buildLLMMessages("user1", "original"),
+		ToolCalls:       []llm.ToolCall{{ID: "call_1", Function: llm.FunctionCall{Name: "echo", Arguments: `{}`}}},
+		NextIndex:       0,
+		OriginalContent: "original",
+		CreatedAt:       time.Now(),
+		ExpiresAt:       time.Now().Add(10 * time.Minute),
+	}
+	ag.sessionManager.SavePendingExecution(pe)
+
+	result, err := ag.Resume(ctx, "user1", "thread1")
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if result.Content != "final summary" {
+		t.Errorf("content = %q, want 'final summary'", result.Content)
+	}
+
+	// 恢复后应清除 PendingExecution
+	if ag.sessionManager.GetPendingExecution("user1", "thread1") != nil {
+		t.Error("expected pending execution to be cleared after resume")
+	}
+}
+
+func TestAgentRunLLMResume(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(&mockTool{name: "echo", description: "echo", output: "echoed", approvalReq: gate.Never})
+
+	dispatcher := tools.NewDispatcher(registry, nil, db.NewMemoryDB())
+	dispatcher.WithGates()
+	pendingStore := gate.NewPendingStore()
+
+	ag := New(Config{Name: "TestAgent"}, Deps{
+		LLM:          &mockLLM{respondWith: "final summary"},
+		Tools:        registry,
+		Dispatcher:   dispatcher,
+		PendingStore: pendingStore,
+	})
+	ctx := context.Background()
+	thread := ag.sessionManager.GetOrCreateThread("user1", "repl")
+
+	// 构造 PendingExecution
+	pe := &PendingExecution{
+		RequestID:       "test-req",
+		UserID:          "user1",
+		ThreadID:        thread.ID,
+		Messages:        ag.buildLLMMessages("user1", "hello"),
+		ToolCalls:       []llm.ToolCall{{ID: "call_1", Function: llm.FunctionCall{Name: "echo", Arguments: `{}`}}},
+		NextIndex:       0,
+		OriginalContent: "hello",
+		CreatedAt:       time.Now(),
+		ExpiresAt:       time.Now().Add(10 * time.Minute),
+	}
+	ag.sessionManager.SavePendingExecution(pe)
+
+	// 发送 __resume__ 应触发 Resume
+	result, err := ag.runLLM(ctx, "user1", "__resume__")
+	if err != nil {
+		t.Fatalf("runLLM resume: %v", err)
+	}
+	if result.Content != "final summary" {
+		t.Errorf("content = %q, want 'final summary'", result.Content)
+	}
+}
+
+func TestAgentRunLLMDiscardOldPending(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(&mockTool{name: "echo", description: "echo", output: "echoed", approvalReq: gate.Never})
+
+	dispatcher := tools.NewDispatcher(registry, nil, db.NewMemoryDB())
+	dispatcher.WithGates()
+	pendingStore := gate.NewPendingStore()
+
+	ag := New(Config{Name: "TestAgent"}, Deps{
+		LLM:          &mockLLM{respondWith: "normal response"},
+		Tools:        registry,
+		Dispatcher:   dispatcher,
+		PendingStore: pendingStore,
+	})
+	ctx := context.Background()
+	thread := ag.sessionManager.GetOrCreateThread("user1", "repl")
+
+	pe := &PendingExecution{
+		RequestID:       "test-req",
+		UserID:          "user1",
+		ThreadID:        thread.ID,
+		Messages:        ag.buildLLMMessages("user1", "hello"),
+		ToolCalls:       []llm.ToolCall{{ID: "call_1", Function: llm.FunctionCall{Name: "echo", Arguments: `{}`}}},
+		NextIndex:       0,
+		OriginalContent: "hello",
+		CreatedAt:       time.Now(),
+		ExpiresAt:       time.Now().Add(10 * time.Minute),
+	}
+	ag.sessionManager.SavePendingExecution(pe)
+
+	// 发送新消息（非 __resume__）应丢弃旧的 pending execution
+	result, err := ag.runLLM(ctx, "user1", "new message")
+	if err != nil {
+		t.Fatalf("runLLM: %v", err)
+	}
+	if result.Content != "normal response" {
+		t.Errorf("content = %q, want 'normal response'", result.Content)
+	}
+	if ag.sessionManager.GetPendingExecution("user1", thread.ID) != nil {
+		t.Error("expected old pending execution to be discarded")
+	}
 }

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/db"
+	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/skills"
@@ -220,6 +223,23 @@ func (a *Agent) handleChat(ctx context.Context, userID string, intent Intent) (c
 func (a *Agent) runLLM(ctx context.Context, userID string, content string) (channels.OutgoingResponse, error) {
 	thread := a.sessionManager.GetOrCreateThread(userID, "repl")
 
+	// 检查是否有 pending execution
+	if pe := a.sessionManager.GetPendingExecution(userID, thread.ID); pe != nil {
+		if content == "__resume__" {
+			// 检查是否还有未解决的 gate
+			if a.deps.PendingStore != nil && a.deps.PendingStore.HasPending(userID, thread.ID) {
+				return channels.OutgoingResponse{Status: "pending_gate", ThreadID: thread.ID}, nil
+			}
+			// Gate 已清除，恢复执行
+			return a.Resume(ctx, userID, thread.ID)
+		}
+		// 用户发送了新消息，丢弃旧的 pending execution 和已批准的 gate
+		a.sessionManager.ClearPendingExecution(userID, thread.ID)
+		if a.deps.PendingStore != nil {
+			a.deps.PendingStore.ClearResolved(userID, thread.ID)
+		}
+	}
+
 	// 构建 LLM 消息历史
 	messages := a.buildLLMMessages(userID, content)
 
@@ -234,7 +254,7 @@ func (a *Agent) runLLM(ctx context.Context, userID string, content string) (chan
 
 	// 如果 LLM 返回工具调用，执行它们
 	if len(resp.ToolCalls) > 0 {
-		return a.handleLLMToolCalls(ctx, userID, thread.ID, content, resp)
+		return a.handleLLMToolCalls(ctx, userID, thread.ID, content, messages, resp)
 	}
 
 	// 普通文本回复
@@ -249,10 +269,10 @@ func (a *Agent) runLLM(ctx context.Context, userID string, content string) (chan
 }
 
 // handleLLMToolCalls 处理 LLM 返回的工具调用。
-func (a *Agent) handleLLMToolCalls(ctx context.Context, userID, threadID, originalContent string, resp llm.CompletionResponse) (channels.OutgoingResponse, error) {
+func (a *Agent) handleLLMToolCalls(ctx context.Context, userID, threadID, originalContent string, messages []llm.Message, resp llm.CompletionResponse) (channels.OutgoingResponse, error) {
 	var toolResults []llm.Message
 
-	for _, call := range resp.ToolCalls {
+	for i, call := range resp.ToolCalls {
 		var params map[string]any
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &params); err != nil {
 			params = map[string]any{"message": call.Function.Arguments}
@@ -263,36 +283,44 @@ func (a *Agent) handleLLMToolCalls(ctx context.Context, userID, threadID, origin
 			ThreadID: threadID,
 		})
 
-		result := out.Content
 		if err != nil {
-			result = fmt.Sprintf("错误: %v", err)
+			if gate.IsPauseError(err) {
+				pe := &PendingExecution{
+					RequestID:       uuid.New().String(),
+					UserID:          userID,
+					ThreadID:        threadID,
+					Messages:        append([]llm.Message(nil), messages...),
+					ToolCalls:       resp.ToolCalls,
+					NextIndex:       i,
+					OriginalContent: originalContent,
+					CreatedAt:       time.Now(),
+					ExpiresAt:       time.Now().Add(10 * time.Minute),
+				}
+				a.sessionManager.SavePendingExecution(pe)
+				return channels.OutgoingResponse{
+					Status:   "pending_gate",
+					ThreadID: threadID,
+				}, nil
+			}
+			toolResults = append(toolResults, llm.Message{
+				Role:     llm.RoleTool,
+				Content:  fmt.Sprintf("错误: %v", err),
+				ToolName: call.Function.Name,
+				ToolID:   call.ID,
+			})
+			continue
 		}
 
 		toolResults = append(toolResults, llm.Message{
 			Role:     llm.RoleTool,
-			Content:  result,
+			Content:  out.Content,
 			ToolName: call.Function.Name,
 			ToolID:   call.ID,
 		})
 	}
 
-	// 将工具结果返回给 LLM 进行总结
-	messages := a.buildLLMMessages(userID, originalContent)
-	messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
-	messages = append(messages, toolResults...)
-
-	finalResp, err := a.deps.LLM.Complete(ctx, messages, nil)
-	if err != nil {
-		return channels.OutgoingResponse{Content: fmt.Sprintf("LLM 总结错误: %v", err)}, nil
-	}
-
-	turn := Turn{
-		UserMsg:   originalContent,
-		AgentResp: finalResp.Content,
-	}
-	a.sessionManager.AddTurn(userID, turn)
-
-	return channels.OutgoingResponse{Content: finalResp.Content}, nil
+	// 所有工具执行完毕，汇总给 LLM
+	return a.finalizeToolResults(ctx, userID, threadID, messages, resp, toolResults, originalContent)
 }
 
 // buildLLMMessages 将对话历史转换为 LLM 消息格式。
@@ -305,6 +333,7 @@ func (a *Agent) buildLLMMessages(userID, currentContent string) []llm.Message {
 			system += "\n\n" + skillPrompt
 		}
 	}
+	system += "\n\n你有多个可用工具（functions）。当用户要求你执行文件操作、执行命令或调用外部工具时，你必须在 assistant 消息中输出 tool_calls 字段来调用工具，严禁在 content 中直接声称已执行。只有等工具返回结果后，你才能基于结果回复用户。"
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: system},
@@ -374,6 +403,73 @@ func (a *Agent) appendExtractedText(msg channels.IncomingMessage) string {
 		sb.WriteString(att.ExtractedText)
 	}
 	return sb.String()
+}
+
+// Resume 从保存的断点恢复执行。
+func (a *Agent) Resume(ctx context.Context, userID, threadID string) (channels.OutgoingResponse, error) {
+	pe := a.sessionManager.GetPendingExecution(userID, threadID)
+	if pe == nil {
+		return channels.OutgoingResponse{}, fmt.Errorf("no pending execution for user %s thread %s", userID, threadID)
+	}
+
+	var toolResults []llm.Message
+
+	for i := pe.NextIndex; i < len(pe.ToolCalls); i++ {
+		call := pe.ToolCalls[i]
+		var params map[string]any
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &params); err != nil {
+			params = map[string]any{"message": call.Function.Arguments}
+		}
+
+		out, err := a.deps.Dispatcher.Dispatch(ctx, call.Function.Name, params, &tools.JobContext{
+			UserID:   userID,
+			ThreadID: threadID,
+		})
+
+		result := out.Content
+		if err != nil {
+			if gate.IsPauseError(err) {
+				// 恢复过程中再次遇到 Pause（理论上不应发生）
+				pe.NextIndex = i
+				pe.CreatedAt = time.Now()
+				pe.ExpiresAt = time.Now().Add(10 * time.Minute)
+				a.sessionManager.SavePendingExecution(pe)
+				return channels.OutgoingResponse{Status: "pending_gate", ThreadID: threadID}, nil
+			}
+			result = fmt.Sprintf("错误: %v", err)
+		}
+
+		toolResults = append(toolResults, llm.Message{
+			Role:     llm.RoleTool,
+			Content:  result,
+			ToolName: call.Function.Name,
+			ToolID:   call.ID,
+		})
+	}
+
+	// 全部完成，清理 pending execution
+	a.sessionManager.ClearPendingExecution(userID, threadID)
+
+	return a.finalizeToolResults(ctx, userID, threadID, pe.Messages, llm.CompletionResponse{ToolCalls: pe.ToolCalls}, toolResults, pe.OriginalContent)
+}
+
+// finalizeToolResults 将工具执行结果汇总给 LLM 并返回最终响应。
+func (a *Agent) finalizeToolResults(ctx context.Context, userID, threadID string, messages []llm.Message, resp llm.CompletionResponse, toolResults []llm.Message, originalContent string) (channels.OutgoingResponse, error) {
+	messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+	messages = append(messages, toolResults...)
+
+	finalResp, err := a.deps.LLM.Complete(ctx, messages, nil)
+	if err != nil {
+		return channels.OutgoingResponse{Content: fmt.Sprintf("LLM 总结错误: %v", err)}, nil
+	}
+
+	turn := Turn{
+		UserMsg:   originalContent,
+		AgentResp: finalResp.Content,
+	}
+	a.sessionManager.AddTurn(userID, turn)
+
+	return channels.OutgoingResponse{Content: finalResp.Content}, nil
 }
 
 // echoReply 无 LLM 时的回退回复。

@@ -85,26 +85,36 @@ func (d *Dispatcher) Dispatch(ctx context.Context, toolName string, params map[s
 		return ToolOutput{}, fmt.Errorf("rate limit exceeded for tool '%s'", toolName)
 	}
 
-	// 4. 执行门控评估
-	for _, g := range d.gates {
-		gctx := &gate.GateContext{
-			ToolName:      toolName,
-			Params:        params,
-			UserID:        jobCtx.UserID,
-			ThreadID:      jobCtx.ThreadID,
-			AutoApproved:  d.autoApproved,
-			ExecutionMode: gate.Interactive,
-			Channel:       "repl",
-		}
-		decision := g.Evaluate(ctx, gctx)
-		switch decision {
-		case gate.Allow:
-			continue
-		case gate.Deny:
-			return ToolOutput{}, fmt.Errorf("tool '%s' denied by gate '%s'", toolName, g.Name())
-		case gate.Pause:
-			pg := d.pendingStore.Create(jobCtx.UserID, jobCtx.ThreadID, toolName, params, "repl")
-			return ToolOutput{}, fmt.Errorf("tool '%s' requires approval (request %s): %s", toolName, pg.RequestID, pg.Description)
+	// 4. 检查是否有已批准但尚未执行的 gate（Resume 场景）
+	if resolved := d.pendingStore.ConsumeResolved(jobCtx.UserID, jobCtx.ThreadID); resolved != nil {
+		// 用户已批准，跳过门控直接执行
+		// 注意：这里不检查 toolName 是否匹配，因为 PendingExecution 保存了完整的 toolCalls
+	} else {
+		// 执行门控评估
+		for _, g := range d.gates {
+			gctx := &gate.GateContext{
+				ToolName:      toolName,
+				Params:        params,
+				UserID:        jobCtx.UserID,
+				ThreadID:      jobCtx.ThreadID,
+				AutoApproved:  d.autoApproved,
+				ExecutionMode: gate.Interactive,
+				Channel:       "repl",
+			}
+			decision := g.Evaluate(ctx, gctx)
+			switch decision {
+			case gate.Allow:
+				continue
+			case gate.Deny:
+				return ToolOutput{}, fmt.Errorf("tool '%s' denied by gate '%s'", toolName, g.Name())
+			case gate.Pause:
+				pg := d.pendingStore.Create(jobCtx.UserID, jobCtx.ThreadID, toolName, params, "repl")
+				return ToolOutput{}, &gate.PauseError{
+					ToolName:    toolName,
+					RequestID:   pg.RequestID,
+					Description: pg.Description,
+				}
+			}
 		}
 	}
 

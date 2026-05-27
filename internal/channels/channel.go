@@ -38,8 +38,9 @@ type IncomingMessage struct {
 
 // OutgoingResponse — 发送到通道的响应。
 type OutgoingResponse struct {
-	Content  string
-	ThreadID string // 可选，用于路由到特定线程
+	Content  string `json:"content,omitempty"`
+	ThreadID string `json:"thread_id,omitempty"` // 可选，用于路由到特定线程
+	Status   string `json:"status,omitempty"`    // "ok" | "pending_gate" | "error"
 }
 
 // Channel — 用户输入源和 Agent 输出汇。

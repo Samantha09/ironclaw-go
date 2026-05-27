@@ -112,7 +112,13 @@ func (m *MemoryTool) Execute(_ context.Context, params map[string]any, jobCtx *t
 }
 
 func (m *MemoryTool) RequiresApproval(params map[string]any) gate.ApprovalRequirement {
+	if params == nil {
+		return gate.UnlessAutoApproved
+	}
 	action, _ := params["action"].(string)
+	if action == "" {
+		return gate.UnlessAutoApproved
+	}
 	if action == "set" || action == "delete" {
 		return gate.UnlessAutoApproved
 	}

@@ -23,7 +23,7 @@ func TestApprovalRequirementIsRequired(t *testing.T) {
 }
 
 func TestApprovalGateInteractive(t *testing.T) {
-	gate := NewApprovalGate(func(toolName string) ApprovalRequirement {
+	gate := NewApprovalGate(func(toolName string, _ map[string]any, _ string) ApprovalRequirement {
 		if toolName == "safe" {
 			return Never
 		}
@@ -61,7 +61,7 @@ func TestApprovalGateInteractive(t *testing.T) {
 }
 
 func TestApprovalGateAutonomous(t *testing.T) {
-	gate := NewApprovalGate(func(toolName string) ApprovalRequirement {
+	gate := NewApprovalGate(func(toolName string, _ map[string]any, _ string) ApprovalRequirement {
 		if toolName == "safe" {
 			return Never
 		}
@@ -89,7 +89,7 @@ func TestApprovalGateAutonomous(t *testing.T) {
 	}
 
 	// Always -> Deny even if auto-approved
-	gateAlways := NewApprovalGate(func(_ string) ApprovalRequirement { return Always })
+	gateAlways := NewApprovalGate(func(_ string, _ map[string]any, _ string) ApprovalRequirement { return Always })
 	gctx = &GateContext{ToolName: "x", ExecutionMode: Autonomous, AutoApproved: map[string]bool{"x": true}}
 	if got := gateAlways.Evaluate(ctx, gctx); got != Deny {
 		t.Errorf("Always autonomous = %v, want Deny", got)
@@ -116,7 +116,7 @@ func TestDefaultToolRequirement(t *testing.T) {
 		{"unknown", nil, UnlessAutoApproved},
 	}
 	for _, tc := range cases {
-		got := DefaultToolRequirement(tc.tool, tc.params)
+		got := DefaultToolRequirement(tc.tool, tc.params, "")
 		if got != tc.want {
 			t.Errorf("DefaultToolRequirement(%q, %v) = %v, want %v", tc.tool, tc.params, got, tc.want)
 		}

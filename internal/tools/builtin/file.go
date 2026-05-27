@@ -95,7 +95,13 @@ func (f *FileTool) Execute(ctx context.Context, params map[string]any, jobCtx *t
 }
 
 func (f *FileTool) RequiresApproval(params map[string]any) gate.ApprovalRequirement {
+	if params == nil {
+		return gate.UnlessAutoApproved
+	}
 	action, _ := params["action"].(string)
+	if action == "" {
+		return gate.UnlessAutoApproved
+	}
 	if action == "write" || action == "delete" || action == "mkdir" {
 		return gate.UnlessAutoApproved
 	}

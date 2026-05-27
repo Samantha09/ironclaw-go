@@ -3,6 +3,7 @@ package httpgw
 import (
 	"context"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -36,10 +37,11 @@ type Gateway struct {
 	shutdown      chan struct{}
 	authenticator auth.Authenticator
 	historyStore  *history.Store
-	pendingStore  *gate.PendingStore
-	healthChecks  []HealthCheck
-	startTime     time.Time
-	version       string
+	pendingStore   *gate.PendingStore
+	riskEvaluator  *gate.RiskBasedEvaluator
+	healthChecks   []HealthCheck
+	startTime      time.Time
+	version        string
 }
 
 // New 创建新的 HTTP 网关通道。
@@ -71,6 +73,12 @@ func (g *Gateway) WithHistory(h *history.Store) *Gateway {
 // WithPendingStore 设置 gate pending store 以支持审批端点。
 func (g *Gateway) WithPendingStore(ps *gate.PendingStore) *Gateway {
 	g.pendingStore = ps
+	return g
+}
+
+// WithRiskEvaluator 设置风险策略评估器以支持学习模式。
+func (g *Gateway) WithRiskEvaluator(ev *gate.RiskBasedEvaluator) *Gateway {
+	g.riskEvaluator = ev
 	return g
 }
 
@@ -156,8 +164,8 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 认证
-	if g.authenticator != nil {
+	// 认证：若提供了 API Key，则通过认证器解析用户身份；否则保留前端传入的 user_id
+	if g.authenticator != nil && req.APIKey != "" {
 		userID, err := g.authenticator.Authenticate(r.Context(), req.APIKey)
 		if err != nil {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -187,19 +195,51 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		g.mu.Unlock()
 	}()
 
+	// 处理附件
+	var attachments []channels.Attachment
+	for _, attReq := range req.Attachments {
+		data, _ := base64.StdEncoding.DecodeString(attReq.DataBase64)
+		attachments = append(attachments, channels.Attachment{
+			Kind:     channels.AttachmentKindDocument,
+			MIMEType: attReq.MIMEType,
+			Filename: attReq.Filename,
+			SizeBytes: int64(len(data)),
+			Data:      data,
+		})
+	}
+
 	// 将消息发送到 Agent
 	g.msgChan <- channels.IncomingMessage{
-		ID:       requestID,
-		Channel:  g.Name(),
-		UserID:   req.UserID,
-		Content:  req.Content,
-		ThreadID: req.ThreadID,
+		ID:          requestID,
+		Channel:     g.Name(),
+		UserID:      req.UserID,
+		Content:     req.Content,
+		ThreadID:    req.ThreadID,
+		Attachments: attachments,
 	}
 
 	// 等待响应（带超时）
 	select {
 	case resp := <-respChan:
 		w.Header().Set("Content-Type", "application/json")
+		if resp.Status == "pending_gate" {
+			var gateInfo map[string]any
+			if g.pendingStore != nil {
+				if pg, ok := g.pendingStore.Get(req.UserID, resp.ThreadID); ok {
+					gateInfo = map[string]any{
+						"request_id":  pg.RequestID,
+						"tool_name":   pg.ToolName,
+						"description": pg.Description,
+					}
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":    "pending_gate",
+				"thread_id": resp.ThreadID,
+				"gate":      gateInfo,
+			})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(chatResponse{
 			Content:  resp.Content,
 			ThreadID: resp.ThreadID,
@@ -284,11 +324,18 @@ func (g *Gateway) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+type attachmentRequest struct {
+	MIMEType   string `json:"mime_type"`
+	Filename   string `json:"filename"`
+	DataBase64 string `json:"data_base64"`
+}
+
 type chatRequest struct {
-	UserID   string `json:"user_id"`
-	Content  string `json:"content"`
-	ThreadID string `json:"thread_id,omitempty"`
-	APIKey   string `json:"api_key,omitempty"`
+	UserID      string              `json:"user_id"`
+	Content     string              `json:"content"`
+	ThreadID    string              `json:"thread_id,omitempty"`
+	APIKey      string              `json:"api_key,omitempty"`
+	Attachments []attachmentRequest `json:"attachments,omitempty"`
 }
 
 type chatResponse struct {
@@ -419,7 +466,11 @@ func (g *Gateway) handleGatesPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := g.authenticatedUserID(r)
+	// 免认证模式下，允许前端通过 query param 传递 user_id 以过滤自己的审批项
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		userID = g.authenticatedUserID(r)
+	}
 	if userID == "" {
 		userID = "anonymous"
 	}
@@ -429,12 +480,12 @@ func (g *Gateway) handleGatesPending(w http.ResponseWriter, r *http.Request) {
 	for _, pg := range all {
 		if pg.UserID == userID {
 			filtered = append(filtered, map[string]any{
-				"request_id":   pg.RequestID,
-				"tool_name":    pg.ToolName,
-				"description":  pg.Description,
-				"created_at":   pg.CreatedAt,
-				"expires_at":   pg.ExpiresAt,
-				"thread_id":    pg.ThreadID,
+				"request_id":     pg.RequestID,
+				"tool_name":      pg.ToolName,
+				"description":    pg.Description,
+				"created_at":     pg.CreatedAt,
+				"expires_at":     pg.ExpiresAt,
+				"thread_id":      pg.ThreadID,
 				"source_channel": pg.SourceChannel,
 			})
 		}
@@ -484,11 +535,21 @@ func (g *Gateway) handleGateApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// pg == nil 表示幂等：该请求已被处理过（已消费）
+	toolName := ""
+	if pg != nil {
+		toolName = pg.ToolName
+		// 学习模式：记录用户审批
+		if g.riskEvaluator != nil {
+			g.riskEvaluator.RecordApproval(pg.ToolName, pg.Params, req.UserID)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"approved":   true,
 		"request_id": req.RequestID,
-		"tool_name":  pg.ToolName,
+		"tool_name":  toolName,
 	})
 }
 

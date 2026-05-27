@@ -7,11 +7,11 @@ import (
 
 // ApprovalGate 检查工具是否需要审批，并根据执行模式返回 Allow、Deny 或 Pause。
 type ApprovalGate struct {
-	requirementFn func(toolName string) ApprovalRequirement
+	requirementFn func(toolName string, params map[string]any, userID string) ApprovalRequirement
 }
 
 // NewApprovalGate 创建新的审批门控。
-func NewApprovalGate(requirementFn func(toolName string) ApprovalRequirement) *ApprovalGate {
+func NewApprovalGate(requirementFn func(toolName string, params map[string]any, userID string) ApprovalRequirement) *ApprovalGate {
 	return &ApprovalGate{requirementFn: requirementFn}
 }
 
@@ -22,7 +22,7 @@ func (a *ApprovalGate) Name() string {
 
 // Evaluate 评估工具调用是否允许执行。
 func (a *ApprovalGate) Evaluate(_ context.Context, ctx *GateContext) GateDecision {
-	req := a.requirementFn(ctx.ToolName)
+	req := a.requirementFn(ctx.ToolName, ctx.Params, ctx.UserID)
 
 	isAutoApproved := ctx.AutoApproved[ctx.ToolName]
 
@@ -61,7 +61,7 @@ func (a *ApprovalGate) Evaluate(_ context.Context, ctx *GateContext) GateDecisio
 
 // DefaultToolRequirement 返回默认的工具审批需求。
 // shell、file:write/delete、http:POST/PUT/DELETE/PATCH 需要审批。
-func DefaultToolRequirement(toolName string, params map[string]any) ApprovalRequirement {
+func DefaultToolRequirement(toolName string, params map[string]any, _ string) ApprovalRequirement {
 	switch toolName {
 	case "shell":
 		return UnlessAutoApproved
