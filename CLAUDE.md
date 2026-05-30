@@ -53,6 +53,7 @@ make proto
 - **无全局状态**：注册表、数据库、配置通过构造函数注入（参见 `app/builder.go`）。
 - **边界使用接口**：`Database`、`Channel`、`Tool`、`LlmProvider` 均为 Go 接口。
 - **强类型优于字符串**：使用 `type UserID string`、`type ExtensionName string` 并配合验证构造函数。切勿在内部边界之间传递裸 `string`。
+- **全部使用中文**：所有提交信息（commit message）、代码注释、文档、变量/函数的英文命名除外。与用户的所有交互也用中文。
 
 ## 模块规范
 
