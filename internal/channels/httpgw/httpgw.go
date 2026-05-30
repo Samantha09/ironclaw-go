@@ -42,6 +42,7 @@ type Gateway struct {
 	healthChecks   []HealthCheck
 	startTime      time.Time
 	version        string
+	eventHub       *EventHub
 }
 
 // New 创建新的 HTTP 网关通道。
@@ -53,6 +54,7 @@ func New(port int) *Gateway {
 		shutdown:  make(chan struct{}),
 		startTime: time.Now(),
 		version:   "dev",
+		eventHub:  NewEventHub(),
 	}
 }
 
@@ -117,6 +119,13 @@ func (g *Gateway) SendMessage(_ context.Context, msg channels.OutgoingResponse) 
 	return nil
 }
 
+// PublishEvent 允许外部组件直接向 EventHub 发布事件。
+func (g *Gateway) PublishEvent(ev channels.Event) {
+	if g.eventHub != nil {
+		g.eventHub.Publish(ev)
+	}
+}
+
 func (g *Gateway) Shutdown(ctx context.Context) error {
 	close(g.shutdown)
 	if g.server != nil {
@@ -129,6 +138,7 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 func (g *Gateway) Start() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/chat", g.handleChat)
+	mux.HandleFunc("/api/chat/stream", g.handleChatStream)
 	mux.HandleFunc("/api/history/threads", g.handleHistoryThreads)
 	mux.HandleFunc("/api/history/threads/", g.handleHistoryThreadDetail)
 	mux.HandleFunc("/api/history/stats", g.handleHistoryStats)
@@ -248,6 +258,62 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"timeout"}`, http.StatusGatewayTimeout)
 	case <-g.shutdown:
 		http.Error(w, `{"error":"server shutting down"}`, http.StatusServiceUnavailable)
+	}
+}
+
+func (g *Gateway) handleChatStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID := g.authenticatedUserID(r)
+	if userID == "" {
+		userID = r.URL.Query().Get("user_id")
+	}
+	if userID == "" {
+		userID = "anonymous"
+	}
+	threadID := r.URL.Query().Get("thread_id")
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// 发送初始连接事件
+	fmt.Fprintf(w, "event: connected\ndata: %s\n\n", `{"status":"ok"}`)
+	flusher.Flush()
+
+	evCh := g.eventHub.Subscribe(userID, threadID)
+	defer g.eventHub.Unsubscribe(userID, threadID, evCh)
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case ev, ok := <-evCh:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, data)
+			flusher.Flush()
+		case <-ticker.C:
+			fmt.Fprintf(w, "event: ping\ndata: {}\n\n")
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		case <-g.shutdown:
+			return
+		}
 	}
 }
 
