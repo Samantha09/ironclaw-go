@@ -6,6 +6,7 @@
 /vendor
 *.zip
 /wasm-runtime/target/
+.worktrees/
 
 # 空目录占位（Git 不追踪空目录，但保留占位文件）
 # 以下目录使用 .gitkeep 占位
