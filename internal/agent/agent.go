@@ -35,6 +35,11 @@ func New(config Config, deps Deps) *Agent {
 	}
 }
 
+// SetEventPublisher 设置事件发布回调。
+func (a *Agent) SetEventPublisher(pub func(ev channels.Event)) {
+	a.deps.EventPublisher = pub
+}
+
 func (a *Agent) publishEvent(userID, threadID string, evType channels.EventType, payload string, meta map[string]any) {
 	if a.deps.EventPublisher == nil {
 		return

@@ -158,6 +158,9 @@ func Build(cfg config.Config) (*App, error) {
 		})
 		gw.Start()
 		mgr.Add(gw)
+		// 将 Gateway 的 EventHub 绑定到 Agent 和 Dispatcher
+		dispatcher.WithEventPublisher(gw.PublishEvent)
+		ag.SetEventPublisher(gw.PublishEvent)
 		logger.Info("HTTP Gateway started", slog.Int("port", cfg.Channels.HTTPPort))
 	}
 
