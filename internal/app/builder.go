@@ -19,6 +19,8 @@ import (
 	"github.com/nearai/ironclaw-go/internal/hooks"
 	"github.com/nearai/ironclaw-go/internal/llm"
 	"github.com/nearai/ironclaw-go/internal/observability"
+	"time"
+
 	"github.com/nearai/ironclaw-go/internal/safety"
 	"github.com/nearai/ironclaw-go/internal/secrets"
 	"github.com/nearai/ironclaw-go/internal/skills"
@@ -86,7 +88,11 @@ func Build(cfg config.Config) (*App, error) {
 	hookRegistry := hooks.NewRegistry()
 
 	// Safety + Dispatcher
-	safetyLayer := safety.NewLayer()
+	safetyLayer := safety.NewLayerWithConfig(safety.Config{
+		MaxOutputLength: 10000,
+		RateMaxCalls:    100,
+		RateWindow:      time.Minute,
+	})
 	dispatcher := tools.NewDispatcher(registry, safetyLayer, database)
 
 	// Gate: 审批门控（基于风险策略）
