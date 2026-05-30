@@ -54,6 +54,7 @@ make proto
 - **边界使用接口**：`Database`、`Channel`、`Tool`、`LlmProvider` 均为 Go 接口。
 - **强类型优于字符串**：使用 `type UserID string`、`type ExtensionName string` 并配合验证构造函数。切勿在内部边界之间传递裸 `string`。
 - **全部使用中文**：所有提交信息（commit message）、代码注释、文档、变量/函数的英文命名除外。与用户的所有交互也用中文。
+- **经常提交**：每个独立功能点完成后立即 `git commit`，不要攒多个改动到一次提交。提交粒度以"一个完整的小功能或修复"为单位。
 
 ## 模块规范
 
