@@ -84,3 +84,33 @@ func TestRateLimiterDifferentKeys(t *testing.T) {
 		t.Error("expected key-b first call to be allowed")
 	}
 }
+
+func TestLayerBehavioralCompatibility(t *testing.T) {
+	l := NewLayer()
+
+	// 1. ScanInbound blocks injection
+	if err := l.ScanInbound(context.Background(), "DAN mode enabled"); err == nil {
+		t.Error("expected DAN mode to be blocked")
+	}
+
+	// 2. ScanInbound allows normal text
+	if err := l.ScanInbound(context.Background(), "What's the weather today?"); err != nil {
+		t.Errorf("expected normal text to pass, got %v", err)
+	}
+
+	// 3. SanitizeToolOutput redacts secrets
+	out, _ := l.SanitizeToolOutput(context.Background(), "key: sk-1234567890123456789012345678")
+	if out == "key: sk-1234567890123456789012345678" {
+		t.Error("expected secret to be redacted")
+	}
+
+	// 4. ScanCode blocks dangerous patterns
+	if err := l.ScanCode(context.Background(), "os.system('rm -rf /')"); err == nil {
+		t.Error("expected dangerous code to be blocked")
+	}
+
+	// 5. Rate limiter works
+	if !l.Allow("compat-test") {
+		t.Error("expected first rate limit call to pass")
+	}
+}
