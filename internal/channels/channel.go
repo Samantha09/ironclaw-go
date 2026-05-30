@@ -43,6 +43,28 @@ type OutgoingResponse struct {
 	Status   string `json:"status,omitempty"`    // "ok" | "pending_gate" | "error"
 }
 
+// EventType 表示通过通道推送的事件类型。
+type EventType string
+
+const (
+	EventAgentResponse EventType = "agent_response"
+	EventToolCall      EventType = "tool_call"
+	EventToolResult    EventType = "tool_result"
+	EventGatePending   EventType = "gate_pending"
+	EventGateResolved  EventType = "gate_resolved"
+	EventError         EventType = "error"
+	EventPing          EventType = "ping"
+)
+
+// Event 是通过 SSE 等推送通道分发的结构化事件。
+type Event struct {
+	Type     EventType      `json:"type"`
+	UserID   string         `json:"user_id"`
+	ThreadID string         `json:"thread_id,omitempty"`
+	Payload  string         `json:"payload"`
+	Meta     map[string]any `json:"meta,omitempty"`
+}
+
 // Channel — 用户输入源和 Agent 输出汇。
 type Channel interface {
 	Name() string
