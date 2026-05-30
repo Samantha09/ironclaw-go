@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/db"
 	"github.com/nearai/ironclaw-go/internal/gate"
 	"github.com/nearai/ironclaw-go/internal/safety"
@@ -19,8 +20,9 @@ type Dispatcher struct {
 	allowed      map[string]bool // 允许的工具白名单，nil 表示允许所有
 	database     db.Database
 	gates        []gate.Gate
-	pendingStore *gate.PendingStore
-	autoApproved map[string]bool
+	pendingStore   *gate.PendingStore
+	autoApproved   map[string]bool
+	eventPublisher func(ev channels.Event)
 }
 
 // NewDispatcher 创建新的调度器。
@@ -58,6 +60,12 @@ func (d *Dispatcher) WithAutoApproved(tools []string) *Dispatcher {
 	for _, name := range tools {
 		d.autoApproved[name] = true
 	}
+	return d
+}
+
+// WithEventPublisher 设置事件发布回调。
+func (d *Dispatcher) WithEventPublisher(pub func(ev channels.Event)) *Dispatcher {
+	d.eventPublisher = pub
 	return d
 }
 
@@ -119,9 +127,33 @@ func (d *Dispatcher) Dispatch(ctx context.Context, toolName string, params map[s
 	}
 
 	// 5. 执行工具
+	if d.eventPublisher != nil {
+		d.eventPublisher(channels.Event{
+			Type:     channels.EventToolCall,
+			UserID:   jobCtx.UserID,
+			ThreadID: jobCtx.ThreadID,
+			Payload:  fmt.Sprintf("Executing tool: %s", toolName),
+			Meta:     map[string]any{"tool_name": toolName},
+		})
+	}
+
 	start := time.Now()
 	out, err := tool.Execute(ctx, params, jobCtx)
 	out.Duration = time.Since(start).Milliseconds()
+
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	if d.eventPublisher != nil {
+		d.eventPublisher(channels.Event{
+			Type:     channels.EventToolResult,
+			UserID:   jobCtx.UserID,
+			ThreadID: jobCtx.ThreadID,
+			Payload:  fmt.Sprintf("Tool %s %s (%d ms)", toolName, status, out.Duration),
+			Meta:     map[string]any{"tool_name": toolName, "status": status, "duration_ms": out.Duration},
+		})
+	}
 
 	// 5. 输出净化
 	if err == nil && d.safety != nil {
