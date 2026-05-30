@@ -35,6 +35,19 @@ func New(config Config, deps Deps) *Agent {
 	}
 }
 
+func (a *Agent) publishEvent(userID, threadID string, evType channels.EventType, payload string, meta map[string]any) {
+	if a.deps.EventPublisher == nil {
+		return
+	}
+	a.deps.EventPublisher(channels.Event{
+		Type:     evType,
+		UserID:   userID,
+		ThreadID: threadID,
+		Payload:  payload,
+		Meta:     meta,
+	})
+}
+
 // ProcessMessage 处理单个用户输入。
 func (a *Agent) ProcessMessage(ctx context.Context, msg channels.IncomingMessage) (channels.OutgoingResponse, error) {
 	// 文档提取：处理消息中的文档附件
@@ -90,6 +103,11 @@ func (a *Agent) ProcessMessage(ctx context.Context, msg channels.IncomingMessage
 			Channel: msg.Channel,
 			Data:    map[string]any{"response": resp.Content},
 		})
+	}
+
+	// SSE: 发布最终响应事件（LLM 工具链路径已在 finalizeToolResults 中发布）
+	if resp.Status != "pending_gate" && a.deps.EventPublisher != nil {
+		a.publishEvent(msg.UserID, msg.ThreadID, channels.EventAgentResponse, resp.Content, nil)
 	}
 
 	return resp, nil
@@ -278,13 +296,28 @@ func (a *Agent) handleLLMToolCalls(ctx context.Context, userID, threadID, origin
 			params = map[string]any{"message": call.Function.Arguments}
 		}
 
+		a.publishEvent(userID, threadID, channels.EventToolCall,
+			fmt.Sprintf("Executing tool: %s", call.Function.Name),
+			map[string]any{"tool_name": call.Function.Name})
+
 		out, err := a.deps.Dispatcher.Dispatch(ctx, call.Function.Name, params, &tools.JobContext{
 			UserID:   userID,
 			ThreadID: threadID,
 		})
 
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		a.publishEvent(userID, threadID, channels.EventToolResult,
+			fmt.Sprintf("Tool %s %s (%d ms)", call.Function.Name, status, out.Duration),
+			map[string]any{"tool_name": call.Function.Name, "status": status, "duration_ms": out.Duration})
+
 		if err != nil {
 			if gate.IsPauseError(err) {
+				a.publishEvent(userID, threadID, channels.EventGatePending,
+					fmt.Sprintf("Waiting for approval: %s", call.Function.Name),
+					map[string]any{"tool_name": call.Function.Name})
 				pe := &PendingExecution{
 					RequestID:       uuid.New().String(),
 					UserID:          userID,
@@ -450,6 +483,9 @@ func (a *Agent) Resume(ctx context.Context, userID, threadID string) (channels.O
 	// 全部完成，清理 pending execution
 	a.sessionManager.ClearPendingExecution(userID, threadID)
 
+	a.publishEvent(userID, threadID, channels.EventGateResolved,
+		"Resumed execution after approval", nil)
+
 	return a.finalizeToolResults(ctx, userID, threadID, pe.Messages, llm.CompletionResponse{ToolCalls: pe.ToolCalls}, toolResults, pe.OriginalContent)
 }
 
@@ -468,6 +504,8 @@ func (a *Agent) finalizeToolResults(ctx context.Context, userID, threadID string
 		AgentResp: finalResp.Content,
 	}
 	a.sessionManager.AddTurn(userID, turn)
+
+	a.publishEvent(userID, threadID, channels.EventAgentResponse, finalResp.Content, nil)
 
 	return channels.OutgoingResponse{Content: finalResp.Content}, nil
 }

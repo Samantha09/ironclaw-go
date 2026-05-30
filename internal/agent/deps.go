@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/nearai/ironclaw-go/internal/channels"
 	"github.com/nearai/ironclaw-go/internal/db"
 	"github.com/nearai/ironclaw-go/internal/document"
 	"github.com/nearai/ironclaw-go/internal/gate"
@@ -28,4 +29,5 @@ type Deps struct {
 	Hooks              *hooks.Registry
 	Skills             *skills.Registry
 	DocumentMiddleware *document.Middleware
+	EventPublisher     func(ev channels.Event)
 }
