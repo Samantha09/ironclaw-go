@@ -77,6 +77,22 @@
     border-color: rgba(239, 68, 68, 0.15);
   }
 
+  header .sse-status {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(100, 116, 139, 0.08);
+    color: var(--color-text-secondary);
+    border: 1px solid rgba(100, 116, 139, 0.15);
+  }
+
+  header .sse-status.connected {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--color-success);
+    border-color: rgba(16, 185, 129, 0.2);
+  }
+
   main {
     flex: 1;
     display: flex;
@@ -458,6 +474,47 @@
     color: #fff;
   }
 
+  .tool-progress {
+    display: none;
+    align-self: flex-start;
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    background: #f8fafc;
+    border: 1px solid var(--color-border);
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    animation: msgIn 0.2s ease-out;
+    max-width: 82%;
+  }
+
+  .tool-progress.active {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .tool-progress .spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--color-border);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .tool-progress .tool-name {
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .tool-progress .tool-status {
+    color: var(--color-text-muted);
+  }
+
   .hint-text {
     font-size: 11px;
     color: var(--color-text-muted);
@@ -476,6 +533,7 @@
 <body>
 <header>
   <h1>IronClaw</h1>
+  <span class="sse-status" id="sseStatus">SSE 连接中...</span>
   <span class="status" id="status">在线</span>
 </header>
 <main>
@@ -534,11 +592,14 @@ const msgsEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('sendBtn');
 const statusEl = document.getElementById('status');
+const sseStatusEl = document.getElementById('sseStatus');
 const userID = 'web-' + Math.random().toString(36).slice(2, 8);
 let threadID = null;
 let selectedFile = null;
 let selectedFileData = null;
 let activeThreadEl = null;
+let eventSource = null;
+let resolvingGate = false;
 
 function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -564,6 +625,7 @@ function newChat() {
     activeThreadEl.classList.remove('active');
     activeThreadEl = null;
   }
+  connectSSE();
 }
 
 function appendMsg(role, text, attachmentInfo) {
@@ -632,6 +694,29 @@ function removeSkeleton() {
   if (sk) sk.remove();
 }
 
+function showToolProgress(toolName) {
+  removeToolProgress();
+  const div = document.createElement('div');
+  div.className = 'tool-progress active';
+  div.id = 'tool-progress';
+  div.innerHTML = '<div class="spinner"></div><span class="tool-name">' + toolName + '</span><span class="tool-status">执行中...</span>';
+  msgsEl.appendChild(div);
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
+function hideToolProgress() {
+  const tp = document.getElementById('tool-progress');
+  if (tp) {
+    tp.querySelector('.tool-status').textContent = '完成';
+    setTimeout(() => tp.remove(), 1200);
+  }
+}
+
+function removeToolProgress() {
+  const tp = document.getElementById('tool-progress');
+  if (tp) tp.remove();
+}
+
 function onFileSelect(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -668,33 +753,88 @@ async function send() {
   }
 
   try {
-    const res = await fetch('/api/chat', {
+    await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-    const data = await res.json();
-    removeSkeleton();
-    if (!res.ok) {
-      appendMsg('error', data.error || '请求出错');
-    } else if (data.status === 'pending_gate') {
-      appendPendingGateMsg(data.gate);
-      setInputDisabled(true);
-      if (data.thread_id) threadID = data.thread_id;
-    } else {
-      appendMsg('assistant', data.content || '无响应');
-      if (data.thread_id) threadID = data.thread_id;
-    }
+    // 响应通过 SSE 推送，不再阻塞等待
   } catch (err) {
     removeSkeleton();
-    appendMsg('error', '请求失败: ' + err.message);
-  } finally {
+    appendMsg('error', '发送失败: ' + err.message);
     sendBtn.disabled = false;
+  } finally {
     selectedFile = null;
     selectedFileData = null;
     document.getElementById('fileName').textContent = '';
     document.getElementById('fileInput').value = '';
   }
+}
+
+function connectSSE() {
+  if (eventSource) {
+    eventSource.close();
+  }
+  const url = new URL('/api/chat/stream', window.location.href);
+  url.searchParams.set('user_id', userID);
+  if (threadID) url.searchParams.set('thread_id', threadID);
+
+  eventSource = new EventSource(url.toString());
+  sseStatusEl.textContent = 'SSE 连接中...';
+  sseStatusEl.classList.remove('connected');
+
+  eventSource.addEventListener('connected', () => {
+    sseStatusEl.textContent = 'SSE 已连接';
+    sseStatusEl.classList.add('connected');
+  });
+
+  eventSource.addEventListener('agent_response', (e) => {
+    const data = JSON.parse(e.data);
+    removeSkeleton();
+    removeToolProgress();
+    appendMsg('assistant', data.payload);
+    if (data.thread_id) threadID = data.thread_id;
+    sendBtn.disabled = false;
+  });
+
+  eventSource.addEventListener('tool_call', (e) => {
+    const data = JSON.parse(e.data);
+    showToolProgress(data.meta.tool_name);
+  });
+
+  eventSource.addEventListener('tool_result', (e) => {
+    hideToolProgress();
+  });
+
+  eventSource.addEventListener('gate_pending', (e) => {
+    const data = JSON.parse(e.data);
+    removeSkeleton();
+    removeToolProgress();
+    appendPendingGateMsg(data.meta);
+    setInputDisabled(true);
+    if (data.thread_id) threadID = data.thread_id;
+    loadGates();
+  });
+
+  eventSource.addEventListener('gate_resolved', (e) => {
+    const pendingMsg = document.getElementById('pending-gate-msg');
+    if (pendingMsg) pendingMsg.remove();
+    setInputDisabled(false);
+    loadGates();
+  });
+
+  eventSource.addEventListener('error', (e) => {
+    const data = e.data ? JSON.parse(e.data) : {};
+    removeSkeleton();
+    removeToolProgress();
+    appendMsg('error', data.payload || 'SSE 错误');
+    sendBtn.disabled = false;
+  });
+
+  eventSource.onerror = () => {
+    sseStatusEl.textContent = 'SSE 断开';
+    sseStatusEl.classList.remove('connected');
+  };
 }
 
 async function loadGates() {
@@ -725,7 +865,6 @@ async function loadGates() {
       });
     }
 
-    // 如果之前有 pending gate 但现在当前 thread 没有了，且没有正在手动审批，自动 resume
     if (hadPendingGate && !hasThreadGate && threadID && !resolvingGate) {
       const pendingMsg = document.getElementById('pending-gate-msg');
       if (pendingMsg) pendingMsg.remove();
@@ -738,8 +877,6 @@ async function loadGates() {
   }
 }
 
-let resolvingGate = false;
-
 async function resolveGate(requestID, gateThreadID, action) {
   if (resolvingGate) return;
   resolvingGate = true;
@@ -751,7 +888,6 @@ async function resolveGate(requestID, gateThreadID, action) {
     });
     if (!res.ok) throw new Error((await res.json()).error || '操作失败');
 
-    // 如果审批的是当前 thread 的 gate，立即触发 resume
     if (action === 'approve' && gateThreadID === threadID) {
       const pendingMsg = document.getElementById('pending-gate-msg');
       if (pendingMsg) pendingMsg.remove();
@@ -812,6 +948,7 @@ async function loadThread(id) {
         appendMsg(m.role === 'user' ? 'user' : 'assistant', m.content || '');
       });
     }
+    connectSSE();
   } catch (err) {
     appendMsg('error', '加载失败: ' + err.message);
   }
@@ -823,7 +960,9 @@ inputEl.addEventListener('input', () => {
   inputEl.rows = Math.min(lines, 6);
 });
 
-setInterval(loadGates, 5000);
+// 初始化 SSE 和轮询
+connectSSE();
+setInterval(loadGates, 15000);
 loadGates();
 
 // 连接状态检测
